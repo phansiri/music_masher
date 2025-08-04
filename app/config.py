@@ -11,7 +11,7 @@ import warnings
 from pathlib import Path
 from typing import Optional, List
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, ConfigDict
 from pydantic_settings import BaseSettings
 
 
@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     including environment variables, API keys, database settings, and AI model
     configuration with proper validation and warning systems.
     """
+    
+    # Pydantic configuration using ConfigDict
+    model_config = ConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False
+    )
     
     # Environment settings
     ENVIRONMENT: str = Field(
@@ -146,12 +153,6 @@ class Settings(BaseSettings):
         if v < 1 or v > 10:
             raise ValueError("MIN_THEORY_CONCEPTS must be between 1 and 10")
         return v
-    
-    class Config:
-        """Pydantic configuration."""
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
 
 
 class ConfigurationValidator:

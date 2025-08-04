@@ -530,61 +530,235 @@ class AsyncConversationDB:
         Get a comprehensive summary of a conversation.
         
         Args:
-            conversation_id: Unique identifier for the conversation
+            conversation_id: The conversation ID
             
         Returns:
-            Optional[Dict]: Conversation summary or None if not found
+            Dictionary with conversation summary including counts
         """
         async with self._lock:
+            await self.connect()
+            
             try:
-                # Get conversation details directly (avoid nested lock)
-                cursor = await self._connection.execute("""
-                    SELECT * FROM conversations WHERE conversation_id = ?
-                """, (conversation_id,))
-                
-                row = await cursor.fetchone()
-                if not row:
+                # Get conversation details
+                conversation = await self.get_conversation(conversation_id)
+                if not conversation:
                     return None
                 
-                conversation = {
-                    'conversation_id': row['conversation_id'],
-                    'phase': row['phase'],
-                    'created_at': row['created_at'],
-                    'updated_at': row['updated_at'],
-                    'metadata': self._json_to_dict(row['metadata'])
-                }
-                
                 # Get message count
-                cursor = await self._connection.execute("""
-                    SELECT COUNT(*) as message_count FROM messages 
-                    WHERE conversation_id = ?
-                """, (conversation_id,))
-                message_count = (await cursor.fetchone())['message_count']
+                cursor = await self._connection.execute(
+                    "SELECT COUNT(*) as count FROM messages WHERE conversation_id = ?",
+                    (conversation_id,)
+                )
+                message_result = await cursor.fetchone()
+                message_count = message_result["count"] if message_result else 0
                 
                 # Get tool call count
-                cursor = await self._connection.execute("""
-                    SELECT COUNT(*) as tool_call_count FROM tool_calls 
-                    WHERE conversation_id = ?
-                """, (conversation_id,))
-                tool_call_count = (await cursor.fetchone())['tool_call_count']
+                cursor = await self._connection.execute(
+                    "SELECT COUNT(*) as count FROM tool_calls WHERE conversation_id = ?",
+                    (conversation_id,)
+                )
+                tool_call_result = await cursor.fetchone()
+                tool_call_count = tool_call_result["count"] if tool_call_result else 0
                 
                 # Get mashup count
+                cursor = await self._connection.execute(
+                    "SELECT COUNT(*) as count FROM mashups WHERE conversation_id = ?",
+                    (conversation_id,)
+                )
+                mashup_result = await cursor.fetchone()
+                mashup_count = mashup_result["count"] if mashup_result else 0
+                
+                # Get web source count
                 cursor = await self._connection.execute("""
-                    SELECT COUNT(*) as mashup_count FROM mashups 
-                    WHERE conversation_id = ?
+                    SELECT COUNT(*) as count 
+                    FROM web_sources ws
+                    JOIN tool_calls tc ON ws.tool_call_id = tc.tool_call_id
+                    WHERE tc.conversation_id = ?
                 """, (conversation_id,))
-                mashup_count = (await cursor.fetchone())['mashup_count']
+                web_source_result = await cursor.fetchone()
+                web_source_count = web_source_result["count"] if web_source_result else 0
                 
                 return {
                     **conversation,
-                    'message_count': message_count,
-                    'tool_call_count': tool_call_count,
-                    'mashup_count': mashup_count
+                    "message_count": message_count,
+                    "tool_call_count": tool_call_count,
+                    "mashup_count": mashup_count,
+                    "web_source_count": web_source_count
                 }
                 
             except Exception as e:
-                logger.error(f"Error getting conversation summary {conversation_id}: {e}")
+                logger.error(f"Error getting conversation summary: {e}")
                 return None
+
+    async def get_tool_call(self, tool_call_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific tool call by ID.
+        
+        Args:
+            tool_call_id: The tool call ID
+            
+        Returns:
+            Dictionary with tool call details or None if not found
+        """
+        async with self._lock:
+            await self.connect()
+            
+            try:
+                cursor = await self._connection.execute("""
+                    SELECT * FROM tool_calls WHERE tool_call_id = ?
+                """, (tool_call_id,))
+                result = await cursor.fetchone()
+                
+                if result:
+                    return dict(result)
+                return None
+                
+            except Exception as e:
+                logger.error(f"Error getting tool call: {e}")
+                return None
+
+    async def get_mashup(self, mashup_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific mashup by ID.
+        
+        Args:
+            mashup_id: The mashup ID
+            
+        Returns:
+            Dictionary with mashup details or None if not found
+        """
+        async with self._lock:
+            await self.connect()
+            
+            try:
+                cursor = await self._connection.execute("""
+                    SELECT * FROM mashups WHERE mashup_id = ?
+                """, (mashup_id,))
+                result = await cursor.fetchone()
+                
+                if result:
+                    return dict(result)
+                return None
+                
+            except Exception as e:
+                logger.error(f"Error getting mashup: {e}")
+                return None
+
+    async def get_web_sources(self, tool_call_id: int) -> List[Dict[str, Any]]:
+        """
+        Get web sources for a specific tool call.
+        
+        Args:
+            tool_call_id: The tool call ID
+            
+        Returns:
+            List of web source dictionaries
+        """
+        async with self._lock:
+            await self.connect()
+            
+            try:
+                cursor = await self._connection.execute("""
+                    SELECT * FROM web_sources WHERE tool_call_id = ?
+                    ORDER BY relevance_score DESC, created_at DESC
+                """, (tool_call_id,))
+                results = await cursor.fetchall()
+                
+                return [dict(row) for row in results]
+                
+            except Exception as e:
+                logger.error(f"Error getting web sources: {e}")
+                return []
+
+    async def get_conversation_tool_calls(
+        self, 
+        conversation_id: str, 
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Get tool calls for a conversation.
+        
+        Args:
+            conversation_id: The conversation ID
+            limit: Maximum number of results
+            offset: Number of results to skip
+            
+        Returns:
+            List of tool call dictionaries
+        """
+        async with self._lock:
+            await self.connect()
+            
+            try:
+                query = """
+                    SELECT * FROM tool_calls 
+                    WHERE conversation_id = ?
+                    ORDER BY created_at DESC
+                """
+                params = [conversation_id]
+                
+                if limit is not None:
+                    query += " LIMIT ?"
+                    params.append(limit)
+                
+                if offset > 0:
+                    query += " OFFSET ?"
+                    params.append(offset)
+                
+                cursor = await self._connection.execute(query, params)
+                results = await cursor.fetchall()
+                
+                return [dict(row) for row in results]
+                
+            except Exception as e:
+                logger.error(f"Error getting conversation tool calls: {e}")
+                return []
+
+    async def get_conversation_mashups(
+        self, 
+        conversation_id: str, 
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Get mashups for a conversation.
+        
+        Args:
+            conversation_id: The conversation ID
+            limit: Maximum number of results
+            offset: Number of results to skip
+            
+        Returns:
+            List of mashup dictionaries
+        """
+        async with self._lock:
+            await self.connect()
+            
+            try:
+                query = """
+                    SELECT * FROM mashups 
+                    WHERE conversation_id = ?
+                    ORDER BY created_at DESC
+                """
+                params = [conversation_id]
+                
+                if limit is not None:
+                    query += " LIMIT ?"
+                    params.append(limit)
+                
+                if offset > 0:
+                    query += " OFFSET ?"
+                    params.append(offset)
+                
+                cursor = await self._connection.execute(query, params)
+                results = await cursor.fetchall()
+                
+                return [dict(row) for row in results]
+                
+            except Exception as e:
+                logger.error(f"Error getting conversation mashups: {e}")
+                return []
     
     def _dict_to_json(self, data: Optional[Dict[str, Any]]) -> Optional[str]:
         """Convert dictionary to JSON string."""
