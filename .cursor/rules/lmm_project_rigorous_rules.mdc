@@ -1,0 +1,93 @@
+---
+description: >
+  Rigorous Cursor rules for Lit Music Mashup project to enforce
+  mandatory review of documentation and prevent unapproved deviations during development.
+
+globs:
+  - "**/*.py"                      # Any Python source file change implies backend logic changes
+  - "**/*.sql"                     # Database schema or query changes
+  - "implementation_documentation.md" 
+  - "bug-tracker.md"
+  - "music_mashup_prd.md"
+  - ".cursor/rules/**/*.md"
+
+# Rule 1: Backend Code Changes require Implementation Doc review
+rules:
+  - name: "Backend Changes Require Implementation Doc Review"
+    description: "Any change in backend code (.py, .sql) must trigger review of the implementation_documentation.md file."
+    filePatterns:
+      include:
+        - "**/*.py"
+        - "**/*.sql"
+    mustReview:
+      - "implementation_documentation.md"
+
+  # Rule 2: Bug Fixes require Bug Tracker update
+  - name: "Bug Fix Documentation Enforcement"
+    description: "If commit or change messages contain keywords indicating bug fixes, the bug-tracker.md must be updated and reviewed."
+    filePatterns:
+      include:
+        - "**/*.py"
+        - "**/*.md"
+    keywords:
+      include:
+        - "fix"
+        - "bug"
+        - "error"
+        - "patch"
+        - "resolve"
+    mustReview:
+      - "bug-tracker.md"
+
+  # Rule 3: PRD Must Be Reviewed On Feature or Spec Changes
+  - name: "PRD Consistency Check"
+    description: "Any changes in business logic or new features require validation against the PRD (music_mashup_prd.md)."
+    filePatterns:
+      include:
+        - "**/*.py"
+        - "prompt_structure.md"
+        - "implementation_documentation.md"
+    mustReview:
+      - "music_mashup_prd.md"
+
+  # Rule 4: Always Review Bug Tracker for Any Documentation Change
+  - name: "Bug Tracker Review on Bug Tracker Changes"
+    description: "Ensure bug-tracker.md is reviewed whenever it itself or related documentation changes."
+    filePatterns:
+      include:
+        - "bug-tracker.md"
+        - "**/*bug*.md"
+        - "**/*error*.md"
+    mustReview:
+      - "bug-tracker.md"
+
+  # Rule 5: Enforce Human Approval on Contradictory Changes
+  - name: "Human Approval on Contradictory Changes"
+    description: >
+      If any changes in implementation_documentation.md, bug-tracker.md, or music_mashup_prd.md
+      contradict previous accepted versions, require explicit human approval before merging.
+    filePatterns:
+      include:
+        - "implementation_documentation.md"
+        - "bug-tracker.md"
+        - "music_mashup_prd.md"
+    conflictResolution:
+      requireHumanApproval: true
+  
+  # Rule 6: Ensure Educational Context Awareness on All Changes
+  - name: "Educational Context Verification"
+    description: >
+      For all changes related to AI prompts, backend logic, and educational features,
+      Cursor must ensure learning objectives and FERPA/COPPA compliance are preserved as per PRD.
+    filePatterns:
+      include:
+        - "**/*.py"
+        - "prompt_structure.md"
+        - "implementation_documentation.md"
+        - "music_mashup_prd.md"
+    contextCheck:
+      validateEducationalCompliance: true
+
+# Cursor global config
+alwaysApply: true
+

@@ -1,0 +1,11 @@
+---
+description: Educational AI platform bug tracking and documentation management rules
+globs: 
+  - "bug-tracker.md"
+  - "**/*bug*.md"
+  - "**/*error*.md" 
+  - "**/logs/**/*"
+  - "**/tests/**/*"
+alwaysApply: false
+---
+
