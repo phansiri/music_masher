@@ -13,6 +13,7 @@ from app.db import AsyncConversationDB, ConversationPhase, MessageRole, ToolCall
 from app.db.utils import DatabaseUtils, DatabasePerformanceMonitor
 from app.db.validation import ValidationError
 from app.config import get_settings
+from app.services import AsyncWebSearchService, get_web_search_service
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -503,6 +504,42 @@ async def update_conversation_phase(
         raise
     except Exception as e:
         logger.error(f"Error updating conversation phase: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Web search endpoints
+@app.get("/api/v1/web-search/status")
+async def get_web_search_status(
+    web_search: AsyncWebSearchService = Depends(get_web_search_service)
+):
+    """Get web search service status"""
+    try:
+        status = web_search.get_service_status()
+        return {
+            "status": "success",
+            "data": status
+        }
+    except Exception as e:
+        logger.error(f"Error getting web search status: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.post("/api/v1/web-search/search")
+async def search_educational_content(
+    query: str,
+    context: Optional[Dict[str, Any]] = None,
+    web_search: AsyncWebSearchService = Depends(get_web_search_service)
+):
+    """Search for educational content"""
+    try:
+        if context is None:
+            context = {}
+        
+        result = await web_search.search_educational_content(query, context)
+        return {
+            "status": "success",
+            "data": result
+        }
+    except Exception as e:
+        logger.error(f"Error in web search: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # Database utility endpoints
