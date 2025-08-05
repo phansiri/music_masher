@@ -2,7 +2,7 @@
 Async conversational AI agent for the Lit Music Mashup platform.
 
 This module provides the AsyncConversationalMashupAgent class for managing
-conversations with phase-based progression and context extraction.
+conversations with phase-based progression, context extraction, and tool integration.
 """
 
 import asyncio
@@ -16,6 +16,7 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 from app.db import AsyncConversationDB, ConversationPhase, MessageRole
+from app.services import AsyncWebSearchService, AsyncToolOrchestrator
 from app.config import get_settings
 
 # Configure logging
@@ -29,6 +30,7 @@ class ConversationPhase(str, Enum):
     EDUCATIONAL_CLARIFICATION = "educational_clarification"
     CULTURAL_RESEARCH = "cultural_research"
     READY_FOR_GENERATION = "ready_for_generation"
+    ERROR = "error"
 
 
 class SkillLevel(str, Enum):
@@ -40,10 +42,10 @@ class SkillLevel(str, Enum):
 
 class AsyncConversationalMashupAgent:
     """
-    Async conversational AI agent with phase-based conversation management.
+    Async conversational AI agent with phase-based conversation management and tool integration.
     
     This agent handles educational music mashup conversations with context
-    extraction and state management across different conversation phases.
+    extraction, state management, and tool orchestration across different conversation phases.
     """
     
     def __init__(
@@ -52,7 +54,8 @@ class AsyncConversationalMashupAgent:
         model_type: str = "ollama",  # "ollama" or "openai"
         tavily_api_key: Optional[str] = None,
         db_path: Optional[str] = None,
-        openai_api_key: Optional[str] = None
+        openai_api_key: Optional[str] = None,
+        enable_tools: bool = True
     ):
         """
         Initialize the conversational agent.
@@ -63,11 +66,13 @@ class AsyncConversationalMashupAgent:
             tavily_api_key: Optional Tavily API key for web search
             db_path: Path to the database
             openai_api_key: Optional OpenAI API key
+            enable_tools: Whether to enable tool integration
         """
         self.model_name = model_name
         self.model_type = model_type
         self.tavily_api_key = tavily_api_key
         self.openai_api_key = openai_api_key
+        self.enable_tools = enable_tools
         
         # Initialize database
         settings = get_settings()
@@ -76,10 +81,15 @@ class AsyncConversationalMashupAgent:
         # Initialize AI model
         self._initialize_model()
         
+        # Initialize tool orchestrator if enabled
+        self.tool_orchestrator = None
+        if self.enable_tools:
+            self._initialize_tool_orchestrator()
+        
         # System prompts for different phases
         self._initialize_system_prompts()
         
-        logger.info(f"Initialized AsyncConversationalMashupAgent with {model_type} model: {model_name}")
+        logger.info(f"Initialized AsyncConversationalMashupAgent with {model_type} model: {model_name}, tools: {enable_tools}")
     
     def _initialize_model(self):
         """Initialize the AI model based on model_type."""
@@ -99,78 +109,53 @@ class AsyncConversationalMashupAgent:
                 )
             else:
                 raise ValueError(f"Unsupported model type: {self.model_type}")
-                
-            logger.info(f"Successfully initialized {self.model_type} model: {self.model_name}")
-            
         except Exception as e:
             logger.error(f"Failed to initialize model: {e}")
             raise
     
+    def _initialize_tool_orchestrator(self):
+        """Initialize the tool orchestrator."""
+        try:
+            # Initialize web search service
+            web_search_service = AsyncWebSearchService(self.tavily_api_key)
+            
+            # Initialize tool orchestrator
+            self.tool_orchestrator = AsyncToolOrchestrator(
+                web_search_service=web_search_service,
+                db=self.db
+            )
+            logger.info("Tool orchestrator initialized successfully")
+        except Exception as e:
+            logger.warning(f"Failed to initialize tool orchestrator: {e}")
+            self.tool_orchestrator = None
+    
     def _initialize_system_prompts(self):
         """Initialize system prompts for different conversation phases."""
         self.system_prompts = {
-            ConversationPhase.INITIAL: """You are an educational AI assistant specializing in music theory and cultural music education. 
-Your goal is to help users create educational music mashups that combine different genres and cultural elements.
-
-In the initial phase, your role is to:
-1. Welcome the user warmly and explain your capabilities
-2. Ask about their educational goals and target audience
-3. Gather basic information about their interests in music
-4. Set expectations for the conversation flow
-
-Be encouraging, educational, and culturally sensitive. Ask open-ended questions to understand their needs.""",
-
-            ConversationPhase.GENRE_EXPLORATION: """You are now in the genre exploration phase. Your role is to:
-1. Help users identify and explore different music genres
-2. Discuss the cultural origins and significance of genres
-3. Understand how genres can be combined educationally
-4. Gather specific genre preferences and learning objectives
-
-Focus on educational value and cultural context. Ask about:
-- What genres interest them most
-- Their experience level with different genres
-- Cultural elements they want to explore
-- Educational goals for their students/audience""",
-
-            ConversationPhase.EDUCATIONAL_CLARIFICATION: """You are in the educational clarification phase. Your role is to:
-1. Determine the appropriate skill level (beginner, intermediate, advanced)
-2. Clarify specific educational objectives
-3. Understand the target audience (age, experience, context)
-4. Identify key music theory concepts to include
-5. Plan the educational approach and methodology
-
-Ask specific questions about:
-- Student age and experience level
-- Key music theory concepts to teach
-- Cultural learning objectives
-- Assessment and evaluation methods""",
-
-            ConversationPhase.CULTURAL_RESEARCH: """You are in the cultural research phase. Your role is to:
-1. Deepen understanding of cultural elements in chosen genres
-2. Research historical and contemporary significance
-3. Identify educational opportunities for cultural learning
-4. Plan how to incorporate cultural context into the mashup
-5. Consider cultural sensitivity and representation
-
-Focus on:
-- Historical context of genres
-- Cultural significance and meaning
-- Modern interpretations and adaptations
-- Educational value of cultural elements""",
-
-            ConversationPhase.READY_FOR_GENERATION: """You are in the ready for generation phase. Your role is to:
-1. Summarize all gathered information
-2. Confirm the educational approach and objectives
-3. Outline what will be generated
-4. Set expectations for the final output
-5. Ask for any final clarifications or adjustments
-
-Provide a comprehensive summary including:
-- Selected genres and their cultural significance
-- Educational objectives and skill level
-- Key music theory concepts to include
-- Cultural learning elements
-- Expected output format and content"""
+            ConversationPhase.INITIAL: """You are an educational AI assistant for music mashup creation. 
+            Your goal is to help users create educational music mashups that combine different genres 
+            while teaching music theory and cultural context. Start by understanding the user's goals 
+            and experience level. Be friendly, encouraging, and educational.""",
+            
+            ConversationPhase.GENRE_EXPLORATION: """You are helping the user explore different music genres 
+            for their mashup. Ask about their musical preferences, favorite genres, and what they want to learn. 
+            Help them understand the characteristics of different genres and how they might work together. 
+            Be educational and encourage exploration.""",
+            
+            ConversationPhase.EDUCATIONAL_CLARIFICATION: """You are clarifying the educational objectives 
+            for the music mashup. Understand the user's skill level (beginner, intermediate, advanced) 
+            and what music theory concepts they want to learn. Help them set clear learning goals 
+            and explain how the mashup will help them understand these concepts.""",
+            
+            ConversationPhase.CULTURAL_RESEARCH: """You are researching the cultural context and historical 
+            background of the music genres for the mashup. Help the user understand the cultural significance, 
+            historical development, and social context of the genres they've chosen. This will enrich 
+            their educational experience and create more meaningful content.""",
+            
+            ConversationPhase.READY_FOR_GENERATION: """You are preparing to generate the final music mashup. 
+            Summarize what you've learned about the user's preferences, educational goals, and cultural context. 
+            Confirm that you have all the information needed to create an educational mashup that combines 
+            the chosen genres while teaching the specified music theory concepts and cultural context."""
         }
     
     async def process_message(
@@ -180,37 +165,37 @@ Provide a comprehensive summary including:
         context: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Process a user message and return the agent's response.
+        Process a user message and generate a response with tool integration.
         
         Args:
-            session_id: Unique session identifier
-            user_message: The user's message
+            session_id: Session identifier
+            user_message: User's message
             context: Optional additional context
             
         Returns:
-            Dictionary containing response and metadata
+            Response data with potential tool results and phase transition
         """
         try:
             # Get or create conversation
             conversation = await self._get_or_create_conversation(session_id)
-            current_phase = ConversationPhase(conversation.get('phase', ConversationPhase.INITIAL))
-            
-            # Add user message to database
-            await self.db.add_message(session_id, MessageRole.USER, user_message)
+            current_phase = ConversationPhase(conversation['phase'])
             
             # Extract context from user message
             extracted_context = await self._extract_context(user_message, current_phase)
             
-            # Handle conversation based on current phase
-            response_data = await self._handle_conversation_phase(
+            # Handle conversation phase with tool integration
+            response_data = await self._handle_conversation_phase_with_tools(
                 session_id, user_message, conversation, current_phase, extracted_context
             )
             
-            # Add agent response to database
+            # Add user message to database
+            await self.db.add_message(session_id, MessageRole.USER, user_message)
+            
+            # Add AI response to database
             await self.db.add_message(session_id, MessageRole.ASSISTANT, response_data['response'])
             
             # Update conversation phase if needed
-            if response_data.get('phase_transition'):
+            if response_data['phase_transition']:
                 await self.db.update_conversation_phase(session_id, response_data['new_phase'])
             
             return response_data
@@ -219,18 +204,17 @@ Provide a comprehensive summary including:
             logger.error(f"Error processing message: {e}")
             return {
                 'response': "I apologize, but I encountered an error processing your message. Please try again.",
-                'error': str(e),
-                'phase': conversation.get('phase', ConversationPhase.INITIAL) if 'conversation' in locals() else ConversationPhase.INITIAL
+                'phase': ConversationPhase.ERROR,
+                'phase_transition': False,
+                'error': str(e)
             }
     
     async def _get_or_create_conversation(self, session_id: str) -> Dict[str, Any]:
         """Get existing conversation or create a new one."""
         conversation = await self.db.get_conversation(session_id)
         if not conversation:
-            # Create new conversation
             await self.db.create_conversation(session_id)
             conversation = await self.db.get_conversation(session_id)
-        
         return conversation
     
     async def _extract_context(
@@ -242,112 +226,124 @@ Provide a comprehensive summary including:
         Extract context from user message based on current phase.
         
         Args:
-            user_message: The user's message
+            user_message: User's message
             current_phase: Current conversation phase
             
         Returns:
-            Dictionary of extracted context
+            Extracted context dictionary
         """
         context = {
             'message': user_message,
             'phase': current_phase,
-            'extracted_info': {}
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }
         
-        # Extract information based on phase
+        # Phase-specific context extraction
         if current_phase == ConversationPhase.INITIAL:
-            context['extracted_info'] = await self._extract_initial_context(user_message)
+            context.update(await self._extract_initial_context(user_message))
         elif current_phase == ConversationPhase.GENRE_EXPLORATION:
-            context['extracted_info'] = await self._extract_genre_context(user_message)
+            context.update(await self._extract_genre_context(user_message))
         elif current_phase == ConversationPhase.EDUCATIONAL_CLARIFICATION:
-            context['extracted_info'] = await self._extract_educational_context(user_message)
+            context.update(await self._extract_educational_context(user_message))
         elif current_phase == ConversationPhase.CULTURAL_RESEARCH:
-            context['extracted_info'] = await self._extract_cultural_context(user_message)
+            context.update(await self._extract_cultural_context(user_message))
         elif current_phase == ConversationPhase.READY_FOR_GENERATION:
-            context['extracted_info'] = await self._extract_generation_context(user_message)
+            context.update(await self._extract_generation_context(user_message))
         
         return context
     
     async def _extract_initial_context(self, message: str) -> Dict[str, Any]:
         """Extract context from initial phase messages."""
+        message_lower = message.lower()
         context = {
             'educational_goals': [],
             'target_audience': None,
             'music_interests': [],
-            'experience_level': None
+            'skill_level': SkillLevel.INTERMEDIATE
         }
         
-        # Simple keyword-based extraction (can be enhanced with AI)
-        message_lower = message.lower()
+        # Extract skill level
+        if any(word in message_lower for word in ['beginner', 'new', 'start', 'basic']):
+            context['skill_level'] = SkillLevel.BEGINNER
+        elif any(word in message_lower for word in ['advanced', 'expert', 'professional']):
+            context['skill_level'] = SkillLevel.ADVANCED
         
         # Extract educational goals
-        if any(word in message_lower for word in ['teach', 'learn', 'education', 'class', 'student']):
+        if any(word in message_lower for word in ['teach', 'teaching', 'education', 'learn', 'learning']):
             context['educational_goals'].append('teaching')
-        
-        if any(word in message_lower for word in ['theory', 'concept', 'fundamental']):
-            context['educational_goals'].append('music_theory')
+        if any(word in message_lower for word in ['learn', 'learning', 'study', 'understand']):
+            context['educational_goals'].append('learning')
         
         # Extract target audience
-        if any(word in message_lower for word in ['high school', 'college', 'university']):
+        if any(word in message_lower for word in ['high school', 'college', 'university', 'student', 'students']):
             context['target_audience'] = 'higher_education'
-        elif any(word in message_lower for word in ['elementary', 'middle school', 'kids']):
-            context['target_audience'] = 'k12'
+        elif any(word in message_lower for word in ['elementary', 'middle school', 'grade']):
+            context['target_audience'] = 'k12_education'
         
-        # Extract music interests
-        genres = ['jazz', 'classical', 'rock', 'pop', 'hip hop', 'blues', 'folk', 'electronic']
+        # Extract music interests and mentioned genres
+        genres = ['jazz', 'classical', 'rock', 'pop', 'hip hop', 'blues', 'folk', 'electronic', 'country', 'reggae', 'soul', 'r&b', 'metal', 'punk', 'funk', 'disco', 'latin', 'world', 'ambient', 'experimental']
         for genre in genres:
             if genre in message_lower:
                 context['music_interests'].append(genre)
+                context['mentioned_genres'] = context.get('mentioned_genres', []) + [genre]
         
         return context
     
     async def _extract_genre_context(self, message: str) -> Dict[str, Any]:
-        """Extract genre-related context from messages."""
+        """Extract genre-related context."""
+        message_lower = message.lower()
         context = {
             'mentioned_genres': [],
             'cultural_elements': [],
             'combination_ideas': []
         }
         
-        message_lower = message.lower()
-        
-        # Extract mentioned genres
-        genres = ['jazz', 'classical', 'rock', 'pop', 'hip hop', 'blues', 'folk', 'electronic', 
-                 'reggae', 'country', 'r&b', 'soul', 'funk', 'disco', 'punk', 'metal']
+        # Common music genres
+        genres = [
+            'jazz', 'rock', 'pop', 'hip hop', 'classical', 'blues', 'country',
+            'electronic', 'folk', 'reggae', 'soul', 'r&b', 'metal', 'punk',
+            'funk', 'disco', 'latin', 'world', 'ambient', 'experimental'
+        ]
         
         for genre in genres:
             if genre in message_lower:
                 context['mentioned_genres'].append(genre)
         
         # Extract cultural elements
-        cultural_keywords = ['culture', 'tradition', 'heritage', 'history', 'origin', 'background']
-        for keyword in cultural_keywords:
-            if keyword in message_lower:
-                context['cultural_elements'].append(keyword)
+        cultural_elements = [
+            'history', 'tradition', 'culture', 'society', 'community',
+            'ceremony', 'celebration', 'ritual', 'spiritual', 'religious',
+            'heritage', 'custom', 'practice', 'belief', 'ceremony'
+        ]
+        
+        for element in cultural_elements:
+            if element in message_lower:
+                context['cultural_elements'].append(element)
         
         return context
     
     async def _extract_educational_context(self, message: str) -> Dict[str, Any]:
-        """Extract educational context from messages."""
+        """Extract educational context."""
+        message_lower = message.lower()
         context = {
-            'skill_level': None,
+            'skill_level': SkillLevel.INTERMEDIATE,
             'theory_concepts': [],
             'learning_objectives': [],
             'assessment_methods': []
         }
         
-        message_lower = message.lower()
-        
-        # Determine skill level
-        if any(word in message_lower for word in ['beginner', 'basic', 'start', 'new']):
+        # Extract skill level
+        if any(word in message_lower for word in ['beginner', 'new', 'start', 'basic']):
             context['skill_level'] = SkillLevel.BEGINNER
-        elif any(word in message_lower for word in ['intermediate', 'moderate', 'some']):
-            context['skill_level'] = SkillLevel.INTERMEDIATE
-        elif any(word in message_lower for word in ['advanced', 'expert', 'complex']):
+        elif any(word in message_lower for word in ['advanced', 'expert', 'professional']):
             context['skill_level'] = SkillLevel.ADVANCED
         
-        # Extract theory concepts
-        theory_concepts = ['rhythm', 'melody', 'harmony', 'chord', 'scale', 'tempo', 'dynamics']
+        # Music theory concepts
+        theory_concepts = [
+            'rhythm', 'melody', 'harmony', 'chord', 'scale', 'key', 'tempo',
+            'beat', 'syncopation', 'polyrhythm', 'modulation', 'transposition'
+        ]
+        
         for concept in theory_concepts:
             if concept in message_lower:
                 context['theory_concepts'].append(concept)
@@ -355,40 +351,39 @@ Provide a comprehensive summary including:
         return context
     
     async def _extract_cultural_context(self, message: str) -> Dict[str, Any]:
-        """Extract cultural context from messages."""
+        """Extract cultural context."""
+        message_lower = message.lower()
         context = {
-            'cultural_significance': [],
-            'historical_elements': [],
-            'modern_interpretations': []
+            'cultural_elements': [],
+            'historical_context': [],
+            'social_significance': []
         }
         
-        message_lower = message.lower()
+        # Cultural elements
+        cultural_elements = [
+            'history', 'tradition', 'culture', 'society', 'community',
+            'ceremony', 'celebration', 'ritual', 'spiritual', 'religious',
+            'heritage', 'custom', 'practice', 'belief', 'ceremony'
+        ]
         
-        # Extract cultural significance
-        cultural_keywords = ['tradition', 'heritage', 'culture', 'history', 'origin']
-        for keyword in cultural_keywords:
-            if keyword in message_lower:
-                context['cultural_significance'].append(keyword)
+        for element in cultural_elements:
+            if element in message_lower:
+                context['cultural_elements'].append(element)
         
         return context
     
     async def _extract_generation_context(self, message: str) -> Dict[str, Any]:
-        """Extract context for generation phase."""
-        context = {
-            'confirmation': False,
-            'adjustments': [],
-            'final_preferences': []
-        }
-        
+        """Extract generation context."""
         message_lower = message.lower()
+        context = {}
         
-        # Check for confirmation
-        if any(word in message_lower for word in ['yes', 'confirm', 'proceed', 'ready']):
-            context['confirmation'] = True
+        # Check for confirmation words
+        if any(word in message_lower for word in ['yes', 'ready', 'go', 'create', 'generate']):
+            context['ready_for_generation'] = True
         
         return context
     
-    async def _handle_conversation_phase(
+    async def _handle_conversation_phase_with_tools(
         self,
         session_id: str,
         user_message: str,
@@ -397,7 +392,7 @@ Provide a comprehensive summary including:
         extracted_context: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Handle conversation based on current phase.
+        Handle conversation phase with tool integration.
         
         Args:
             session_id: Session identifier
@@ -407,14 +402,19 @@ Provide a comprehensive summary including:
             extracted_context: Extracted context from user message
             
         Returns:
-            Response data with potential phase transition
+            Response data with tool results and potential phase transition
         """
+        # Execute tools based on phase and context
+        tool_results = await self._execute_phase_tools(
+            session_id, current_phase, extracted_context
+        )
+        
         # Get conversation history
         messages = await self.db.get_messages(session_id, limit=10)
         
-        # Prepare messages for AI model
-        ai_messages = await self._prepare_messages_for_ai(
-            messages, current_phase, extracted_context
+        # Prepare messages for AI model with tool results
+        ai_messages = await self._prepare_messages_for_ai_with_tools(
+            messages, current_phase, extracted_context, tool_results
         )
         
         # Get AI response
@@ -436,8 +436,106 @@ Provide a comprehensive summary including:
             'phase_transition': phase_transition['should_transition'],
             'new_phase': phase_transition['new_phase'] if phase_transition['should_transition'] else current_phase,
             'context': extracted_context,
+            'tool_results': tool_results,
             'session_id': session_id
         }
+    
+    async def _execute_phase_tools(
+        self,
+        session_id: str,
+        current_phase: ConversationPhase,
+        context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute tools based on conversation phase and context.
+        
+        Args:
+            session_id: Session identifier
+            current_phase: Current conversation phase
+            context: Extracted context
+            
+        Returns:
+            Tool execution results
+        """
+        if not self.tool_orchestrator:
+            return {}
+        
+        tool_results = {}
+        
+        try:
+            if current_phase == ConversationPhase.INITIAL:
+                # Execute genre exploration searches if genres are mentioned
+                if 'mentioned_genres' in context and context['mentioned_genres']:
+                    genre_results = await self.tool_orchestrator.execute_genre_exploration_searches(
+                        context['mentioned_genres'], context, session_id
+                    )
+                    tool_results['genre_research'] = genre_results
+            
+            elif current_phase == ConversationPhase.GENRE_EXPLORATION:
+                # Execute genre exploration searches
+                if 'mentioned_genres' in context:
+                    genre_results = await self.tool_orchestrator.execute_genre_exploration_searches(
+                        context['mentioned_genres'], context, session_id
+                    )
+                    tool_results['genre_research'] = genre_results
+            
+            elif current_phase == ConversationPhase.CULTURAL_RESEARCH:
+                # Execute cultural research searches
+                if 'cultural_elements' in context:
+                    cultural_results = await self.tool_orchestrator.execute_cultural_research_searches(
+                        context['cultural_elements'], context, session_id
+                    )
+                    tool_results['cultural_research'] = cultural_results
+                
+                # Also search for genre cultural context if available
+                if 'mentioned_genres' in context:
+                    genre_cultural_results = await self.tool_orchestrator.execute_genre_exploration_searches(
+                        context['mentioned_genres'], context, session_id
+                    )
+                    tool_results['genre_cultural_research'] = genre_cultural_results
+            
+            # Process and synthesize tool results
+            if tool_results:
+                processed_results = await self.tool_orchestrator.process_search_results(
+                    [result for results in tool_results.values() for result in results.values()]
+                )
+                tool_results['synthesized'] = processed_results
+            
+        except Exception as e:
+            logger.error(f"Error executing phase tools: {e}")
+            tool_results['error'] = str(e)
+        
+        return tool_results
+    
+    async def _prepare_messages_for_ai_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        current_phase: ConversationPhase,
+        extracted_context: Dict[str, Any],
+        tool_results: Dict[str, Any]
+    ) -> List:
+        """Prepare messages for AI model with tool results."""
+        ai_messages = []
+        
+        # Add system message with tool context
+        system_prompt = self.system_prompts[current_phase]
+        
+        # Add tool results to system prompt if available
+        if tool_results and 'synthesized' in tool_results:
+            synthesized = tool_results['synthesized']
+            if synthesized.get('total_results', 0) > 0:
+                system_prompt += f"\n\nI have found {synthesized['total_results']} relevant sources that may help inform our conversation. Use this information to provide more accurate and educational responses."
+        
+        ai_messages.append(SystemMessage(content=system_prompt))
+        
+        # Add conversation history
+        for message in messages[-6:]:  # Last 6 messages for context
+            if message['role'] == MessageRole.USER:
+                ai_messages.append(HumanMessage(content=message['content']))
+            elif message['role'] == MessageRole.ASSISTANT:
+                ai_messages.append(AIMessage(content=message['content']))
+        
+        return ai_messages
     
     async def _prepare_messages_for_ai(
         self,
@@ -485,56 +583,62 @@ Provide a comprehensive summary including:
         
         if current_phase == ConversationPhase.INITIAL:
             # Transition to genre exploration if user shows interest in specific genres
-            if any(word in message_lower for word in ['genre', 'music', 'style', 'type']):
+            if any(word in message_lower for word in ['genre', 'music', 'style', 'type', 'explore', 'jazz', 'rock', 'pop', 'classical', 'blues', 'country', 'electronic', 'folk', 'reggae', 'soul', 'r&b', 'metal', 'punk', 'funk', 'disco', 'latin', 'world', 'ambient', 'experimental']):
                 return {
                     'should_transition': True,
                     'new_phase': ConversationPhase.GENRE_EXPLORATION
                 }
         
         elif current_phase == ConversationPhase.GENRE_EXPLORATION:
-            # Transition to educational clarification if user mentions educational goals
-            if any(word in message_lower for word in ['teach', 'learn', 'education', 'student', 'class']):
+            # Transition to educational clarification if genres are mentioned
+            if 'mentioned_genres' in extracted_context and extracted_context['mentioned_genres']:
                 return {
                     'should_transition': True,
                     'new_phase': ConversationPhase.EDUCATIONAL_CLARIFICATION
                 }
         
         elif current_phase == ConversationPhase.EDUCATIONAL_CLARIFICATION:
-            # Transition to cultural research if user mentions cultural elements
-            if any(word in message_lower for word in ['culture', 'tradition', 'history', 'background']):
+            # Transition to cultural research if educational goals are clear
+            if 'theory_concepts' in extracted_context or 'has_educational_goals' in extracted_context:
                 return {
                     'should_transition': True,
                     'new_phase': ConversationPhase.CULTURAL_RESEARCH
                 }
         
         elif current_phase == ConversationPhase.CULTURAL_RESEARCH:
-            # Transition to ready phase if user seems ready
-            if any(word in message_lower for word in ['ready', 'proceed', 'generate', 'create']):
+            # Transition to ready for generation if cultural context is explored
+            if 'cultural_elements' in extracted_context or 'mentioned_genres' in extracted_context:
                 return {
                     'should_transition': True,
                     'new_phase': ConversationPhase.READY_FOR_GENERATION
                 }
         
-        # No transition
+        elif current_phase == ConversationPhase.READY_FOR_GENERATION:
+            # Stay in ready phase until user confirms
+            if 'ready_for_generation' in extracted_context:
+                return {
+                    'should_transition': False,
+                    'new_phase': current_phase
+                }
+        
         return {
             'should_transition': False,
             'new_phase': current_phase
         }
     
     def _get_fallback_response(self, phase: ConversationPhase) -> str:
-        """Get fallback response if AI model fails."""
+        """Get fallback response for a given phase."""
         fallback_responses = {
-            ConversationPhase.INITIAL: "I'd love to help you create an educational music mashup! Could you tell me a bit about your goals and what kind of music interests you?",
-            ConversationPhase.GENRE_EXPLORATION: "That's interesting! What genres of music are you most interested in exploring? We can combine different styles to create something educational and engaging.",
-            ConversationPhase.EDUCATIONAL_CLARIFICATION: "Great! What's the skill level of your students or audience? Are they beginners, intermediate, or more advanced?",
-            ConversationPhase.CULTURAL_RESEARCH: "Excellent! What cultural elements would you like to explore? We can research the history and significance of different musical traditions.",
-            ConversationPhase.READY_FOR_GENERATION: "Perfect! Are you ready to proceed with creating the educational mashup based on what we've discussed?"
+            ConversationPhase.INITIAL: "I'm here to help you create an educational music mashup! What kind of music are you interested in exploring?",
+            ConversationPhase.GENRE_EXPLORATION: "That's interesting! What other genres would you like to explore or combine?",
+            ConversationPhase.EDUCATIONAL_CLARIFICATION: "Great! What music theory concepts would you like to learn about?",
+            ConversationPhase.CULTURAL_RESEARCH: "Excellent! Let's explore the cultural context of these genres. What aspects interest you most?",
+            ConversationPhase.READY_FOR_GENERATION: "Perfect! Are you ready to create your educational music mashup?"
         }
-        
-        return fallback_responses.get(phase, "I'm here to help you create an educational music mashup!")
+        return fallback_responses.get(phase, "I'm here to help you with your music mashup project!")
     
     async def close(self):
-        """Close the agent and clean up resources."""
-        if hasattr(self, 'db'):
+        """Close the agent and cleanup resources."""
+        if self.db:
             await self.db.close()
         logger.info("AsyncConversationalMashupAgent closed") 
