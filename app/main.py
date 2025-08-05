@@ -13,7 +13,8 @@ from app.db import AsyncConversationDB, ConversationPhase, MessageRole, ToolCall
 from app.db.utils import DatabaseUtils, DatabasePerformanceMonitor
 from app.db.validation import ValidationError
 from app.config import get_settings
-from app.services import AsyncWebSearchService, get_web_search_service
+from app.services import AsyncWebSearchService, get_web_search_service, AsyncToolOrchestrator, get_tool_orchestrator
+from app.agents.conversation_agent import AsyncConversationalMashupAgent
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -98,7 +99,6 @@ class MessageCreateRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message_id: int
-    conversation_id: str
     role: str
     content: str
     timestamp: datetime
@@ -162,20 +162,54 @@ class ConversationSummaryResponse(BaseModel):
     mashup_count: int
     web_source_count: int
 
-# Dependency injection
+# Conversational API models
+class ChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
+
+class ChatResponse(BaseModel):
+    response: str
+    session_id: str
+    phase: str
+    phase_transition: bool
+    new_phase: Optional[str] = None
+    context: Dict[str, Any]
+    tool_results: Optional[Dict[str, Any]] = None
+    timestamp: datetime
+
+class ToolStatisticsResponse(BaseModel):
+    total_tool_calls: int
+    successful_calls: int
+    failed_calls: int
+    success_rate: float
+
+# Dependency injection functions
 async def get_db():
-    """Database dependency"""
-    settings = get_settings()
-    db = AsyncConversationDB(settings.DATABASE_PATH)
-    try:
-        await db.init_db()
-        yield db
-    finally:
-        await db.close()
+    """Get database instance."""
+    if db_instance is None:
+        raise HTTPException(status_code=500, detail="Database not initialized")
+    return db_instance
 
 async def get_settings_dep():
-    """Settings dependency"""
+    """Get settings instance."""
     return get_settings()
+
+async def get_tool_orchestrator_dep():
+    """Get tool orchestrator instance."""
+    db = await get_db()
+    web_search = get_web_search_service()
+    return await get_tool_orchestrator(web_search_service=web_search, db=db)
+
+async def get_conversation_agent():
+    """Get conversation agent instance."""
+    settings = get_settings()
+    return AsyncConversationalMashupAgent(
+        model_name=settings.OLLAMA_MODEL,
+        tavily_api_key=settings.TAVILY_API_KEY,
+        db_path=settings.DATABASE_PATH,
+        enable_tools=True
+    )
 
 # Root endpoint
 @app.get("/", response_model=AppInfoResponse)
@@ -540,6 +574,121 @@ async def search_educational_content(
         }
     except Exception as e:
         logger.error(f"Error in web search: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+# Conversational API endpoints
+@app.post("/api/v1/chat", response_model=ChatResponse)
+async def chat_with_agent(
+    request: ChatRequest,
+    agent: AsyncConversationalMashupAgent = Depends(get_conversation_agent)
+):
+    """
+    Chat with the conversational AI agent.
+    
+    This endpoint provides the main conversational interface for the educational
+    music mashup platform with tool integration and phase-based conversation management.
+    """
+    try:
+        # Generate session ID if not provided
+        session_id = request.session_id or f"session_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+        
+        # Process message with agent
+        result = await agent.process_message(
+            session_id=session_id,
+            user_message=request.message,
+            context=request.context
+        )
+        
+        # Prepare response
+        response = ChatResponse(
+            response=result['response'],
+            session_id=session_id,
+            phase=result['phase'].value,
+            phase_transition=result['phase_transition'],
+            new_phase=result['new_phase'].value if result['new_phase'] else None,
+            context=result['context'],
+            tool_results=result.get('tool_results'),
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/v1/session/{session_id}")
+async def get_conversation_session(
+    session_id: str,
+    db: AsyncConversationDB = Depends(get_db)
+):
+    """Get conversation session information."""
+    try:
+        conversation = await db.get_conversation(session_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get recent messages
+        messages = await db.get_messages(session_id, limit=10)
+        
+        # Get tool statistics
+        tool_stats = await db.get_conversation_tool_calls(session_id, limit=5)
+        
+        return {
+            "session_id": session_id,
+            "conversation": conversation,
+            "recent_messages": messages,
+            "tool_calls": tool_stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting conversation session: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/v1/tools/statistics", response_model=ToolStatisticsResponse)
+async def get_tool_statistics(
+    session_id: Optional[str] = None,
+    tool_orchestrator: AsyncToolOrchestrator = Depends(get_tool_orchestrator_dep)
+):
+    """Get tool usage statistics."""
+    try:
+        stats = await tool_orchestrator.get_tool_statistics(session_id)
+        
+        if "error" in stats:
+            raise HTTPException(status_code=500, detail=stats["error"])
+        
+        return ToolStatisticsResponse(**stats)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting tool statistics: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/api/v1/tools/status")
+async def get_tools_status(
+    tool_orchestrator: AsyncToolOrchestrator = Depends(get_tool_orchestrator_dep)
+):
+    """Get status of all available tools."""
+    try:
+        web_search_available = await tool_orchestrator.is_web_search_available()
+        
+        return {
+            "web_search": {
+                "available": web_search_available,
+                "service": "Tavily API"
+            },
+            "tool_orchestrator": {
+                "available": True,
+                "max_concurrent_tools": tool_orchestrator.max_concurrent_tools,
+                "tool_timeout": tool_orchestrator.tool_timeout
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting tools status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # Database utility endpoints
