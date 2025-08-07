@@ -164,11 +164,69 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app with lifespan
 app = FastAPI(
     title="Lit Music Mashup Conversational API",
-    description="Educational AI Music Generation with Conversational Interface",
+    description="""
+    ## Educational AI Music Generation Platform
+    
+    This API provides conversational AI-powered educational music mashup generation with comprehensive learning materials.
+    
+    ### Key Features:
+    - **Conversational Interface**: Multi-turn conversations to gather context
+    - **Educational Focus**: Every mashup includes music theory and cultural context
+    - **Tool Integration**: Web search for current cultural information
+    - **Phase-based Management**: Structured conversation flow
+    - **Local AI Models**: Privacy-focused with Ollama integration
+    
+    ### Authentication:
+    - API key required via Authorization header: `Bearer YOUR_API_KEY`
+    - Set API_KEY environment variable for authentication
+    
+    ### Rate Limiting:
+    - 60 requests per minute per IP address
+    - Exempt endpoints: health, docs, root
+    
+    ### Usage Flow:
+    1. Start conversation via `/api/v1/chat`
+    2. Agent gathers context through multi-turn dialogue
+    3. Web search tools provide current cultural information
+    4. Generate educational mashup when context is sufficient
+    
+    ### Support:
+    For questions or issues, consult the project documentation.
+    """,
     version="2.0.0-conversational-mvp",
     docs_url="/docs",
     redoc_url="/redoc",
-    lifespan=lifespan
+    lifespan=lifespan,
+    contact={
+        "name": "Lit Music Mashup Team",
+        "url": "https://github.com/your-repo/lit-music-mashup",
+    },
+    license_info={
+        "name": "MIT License",
+        "url": "https://opensource.org/licenses/MIT",
+    },
+    tags_metadata=[
+        {
+            "name": "Core",
+            "description": "Core application endpoints (health, info)"
+        },
+        {
+            "name": "Conversation",
+            "description": "Conversational AI interaction endpoints"
+        },
+        {
+            "name": "Database",
+            "description": "Database operations and management"
+        },
+        {
+            "name": "Tools",
+            "description": "Tool integration and web search"
+        },
+        {
+            "name": "Admin",
+            "description": "Administrative database utilities"
+        }
+    ]
 )
 
 # Add middleware
@@ -432,9 +490,20 @@ class ConversationSummaryResponse(BaseModel):
     web_source_count: int = Field(..., ge=0, description="Web source count")
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=5000, description="User message")
-    session_id: Optional[str] = Field(None, max_length=100, description="Session ID")
-    context: Optional[Dict[str, Any]] = Field(None, description="Additional context")
+    """Chat request model for conversational AI interaction."""
+    message: str = Field(..., min_length=1, max_length=5000, description="User message", example="I want to create a jazz and hip-hop mashup for my students")
+    session_id: Optional[str] = Field(None, max_length=100, description="Session ID for conversation continuity", example="session_20240101_120000")
+    context: Optional[Dict[str, Any]] = Field(None, description="Additional context for the conversation")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "I want to create a jazz and hip-hop mashup for my students",
+                "session_id": "session_20240101_120000",
+                "context": {"skill_level": "intermediate", "class_size": 25}
+            }
+        }
+    )
 
     @validator('message')
     def validate_message(cls, v):
@@ -468,14 +537,30 @@ class ChatRequest(BaseModel):
         return v
 
 class ChatResponse(BaseModel):
-    response: str = Field(..., description="AI response")
-    session_id: str = Field(..., description="Session ID")
-    phase: str = Field(..., description="Current conversation phase")
-    phase_transition: bool = Field(..., description="Whether phase transition occurred")
-    new_phase: Optional[str] = Field(None, description="New phase if transition occurred")
-    context: Dict[str, Any] = Field(..., description="Conversation context")
-    tool_results: Optional[Dict[str, Any]] = Field(None, description="Tool execution results")
+    """Chat response model from conversational AI agent."""
+    response: str = Field(..., description="AI agent response", example="Great! Let's explore jazz and hip-hop fusion. What specific learning objectives do you have?")
+    session_id: str = Field(..., description="Session ID for conversation continuity", example="session_20240101_120000")
+    phase: str = Field(..., description="Current conversation phase", example="genre_exploration")
+    phase_transition: bool = Field(..., description="Whether phase transition occurred", example=True)
+    new_phase: Optional[str] = Field(None, description="New phase if transition occurred", example="educational_clarification")
+    context: Dict[str, Any] = Field(..., description="Current conversation context")
+    tool_results: Optional[Dict[str, Any]] = Field(None, description="Results from tool executions (web search, etc.)")
     timestamp: datetime = Field(..., description="Response timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "response": "Great! Let's explore jazz and hip-hop fusion. What specific learning objectives do you have?",
+                "session_id": "session_20240101_120000",
+                "phase": "genre_exploration",
+                "phase_transition": True,
+                "new_phase": "educational_clarification",
+                "context": {"genres": ["jazz", "hip-hop"], "skill_level": "intermediate"},
+                "tool_results": {"web_search": {"sources_found": 5}},
+                "timestamp": "2024-01-01T00:00:00Z"
+            }
+        }
+    )
 
 class ToolStatisticsResponse(BaseModel):
     total_tool_calls: int = Field(..., ge=0, description="Total tool calls")
@@ -485,16 +570,40 @@ class ToolStatisticsResponse(BaseModel):
     average_response_time: Optional[float] = Field(None, ge=0.0, description="Average response time in seconds")
 
 class StandardResponse(BaseModel):
-    status: str = Field(..., description="Response status")
-    message: str = Field(..., description="Response message")
-    data: Optional[Dict[str, Any]] = Field(None, description="Response data")
+    """Standard API response format for consistency across all endpoints."""
+    status: str = Field(..., description="Response status (success/error)", example="success")
+    message: str = Field(..., description="Human-readable response message", example="Operation completed successfully")
+    data: Optional[Dict[str, Any]] = Field(None, description="Response data payload")
     timestamp: datetime = Field(..., description="Response timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "success",
+                "message": "Operation completed successfully",
+                "data": {"example_key": "example_value"},
+                "timestamp": "2024-01-01T00:00:00Z"
+            }
+        }
+    )
 
 class ErrorResponse(BaseModel):
-    status: str = Field(default="error", description="Error status")
-    message: str = Field(..., description="Error message")
-    detail: Optional[str] = Field(None, description="Error detail")
+    """Standard error response format for consistency across all endpoints."""
+    status: str = Field(default="error", description="Error status", example="error")
+    message: str = Field(..., description="Error message", example="Validation failed")
+    detail: Optional[str] = Field(None, description="Error detail", example="Input validation failed for field 'message'")
     timestamp: datetime = Field(..., description="Error timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "error",
+                "message": "Validation failed",
+                "detail": "Input validation failed for field 'message'",
+                "timestamp": "2024-01-01T00:00:00Z"
+            }
+        }
+    )
 
 # Dependency injection functions
 async def get_db():
@@ -524,7 +633,7 @@ async def get_conversation_agent():
     )
 
 # Root endpoint with enhanced response
-@app.get("/", response_model=AppInfoResponse)
+@app.get("/", response_model=AppInfoResponse, tags=["Core"])
 async def root():
     """Root endpoint with app information"""
     return AppInfoResponse(
@@ -535,7 +644,7 @@ async def root():
     )
 
 # Enhanced health check endpoint
-@app.get("/health", response_model=HealthResponse)
+@app.get("/health", response_model=HealthResponse, tags=["Core"])
 async def health_check(db: AsyncConversationDB = Depends(get_db)):
     """Health check endpoint with database status"""
     try:
@@ -554,7 +663,7 @@ async def health_check(db: AsyncConversationDB = Depends(get_db)):
     )
 
 # Enhanced conversation endpoints with validation
-@app.post("/conversations", response_model=ConversationResponse)
+@app.post("/conversations", response_model=ConversationResponse, tags=["Database"])
 async def create_conversation(
     request: ConversationCreateRequest,
     db: AsyncConversationDB = Depends(get_db)
@@ -589,7 +698,7 @@ async def create_conversation(
         logger.error(f"Error creating conversation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/conversations/{conversation_id}", response_model=ConversationResponse)
+@app.get("/conversations/{conversation_id}", response_model=ConversationResponse, tags=["Database"])
 async def get_conversation(
     conversation_id: str,
     db: AsyncConversationDB = Depends(get_db)
@@ -910,7 +1019,7 @@ class WebSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=500, description="Search query")
     context: Optional[Dict[str, Any]] = Field(None, description="Search context")
 
-@app.post("/api/v1/web-search/search")
+@app.post("/api/v1/web-search/search", tags=["Tools"])
 async def search_educational_content(
     request: WebSearchRequest,
     web_search: AsyncWebSearchService = Depends(get_web_search_service)
@@ -934,7 +1043,7 @@ async def search_educational_content(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # Enhanced conversational API endpoints
-@app.post("/api/v1/chat", response_model=ChatResponse)
+@app.post("/api/v1/chat", response_model=ChatResponse, tags=["Conversation"])
 async def chat_with_agent(
     request: ChatRequest,
     agent: AsyncConversationalMashupAgent = Depends(get_conversation_agent)
@@ -974,7 +1083,7 @@ async def chat_with_agent(
         logger.error(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/api/v1/session/{session_id}")
+@app.get("/api/v1/session/{session_id}", tags=["Conversation"])
 async def get_conversation_session(
     session_id: str,
     db: AsyncConversationDB = Depends(get_db)
@@ -1013,7 +1122,7 @@ async def get_conversation_session(
         logger.error(f"Error getting conversation session: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/api/v1/tools/statistics", response_model=ToolStatisticsResponse)
+@app.get("/api/v1/tools/statistics", response_model=ToolStatisticsResponse, tags=["Tools"])
 async def get_tool_statistics(
     session_id: Optional[str] = Query(None, description="Optional session ID for filtering"),
     tool_orchestrator: AsyncToolOrchestrator = Depends(get_tool_orchestrator_dep)
@@ -1033,7 +1142,7 @@ async def get_tool_statistics(
         logger.error(f"Error getting tool statistics: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/api/v1/tools/status")
+@app.get("/api/v1/tools/status", tags=["Tools"])
 async def get_tools_status(
     tool_orchestrator: AsyncToolOrchestrator = Depends(get_tool_orchestrator_dep)
 ):
@@ -1063,7 +1172,7 @@ async def get_tools_status(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # Enhanced database utility endpoints
-@app.post("/admin/database/backup")
+@app.post("/admin/database/backup", tags=["Admin"])
 async def create_database_backup(
     backup_name: Optional[str] = Query(None, max_length=100, description="Optional backup name"),
     settings: Any = Depends(get_settings_dep)
