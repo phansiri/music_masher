@@ -1,12 +1,17 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel, ConfigDict, Field, validator
 from typing import Optional, Dict, Any, List
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+from collections import defaultdict
+import asyncio
 
 # Import database components
 from app.db import AsyncConversationDB, ConversationPhase, MessageRole, ToolCallType
@@ -22,6 +27,113 @@ logger = logging.getLogger(__name__)
 
 # Global database instance for lifespan management
 db_instance: Optional[AsyncConversationDB] = None
+
+# Rate limiting storage - reset for each test
+rate_limit_storage = defaultdict(list)
+
+def reset_rate_limit_storage():
+    """Reset rate limiting storage for testing."""
+    global rate_limit_storage
+    rate_limit_storage.clear()
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+# Rate limiting middleware function
+async def rate_limit_middleware(request: Request, call_next):
+    """Rate limiting middleware for API endpoints."""
+    requests_per_minute = 60
+    
+    # Skip rate limiting for exempt paths
+    exempt_paths = {
+        "/",
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json"
+    }
+    
+    if request.url.path in exempt_paths:
+        return await call_next(request)
+    
+    # Get client IP
+    client_ip = request.client.host
+    
+    # Clean old requests
+    current_time = time.time()
+    rate_limit_storage[client_ip] = [
+        req_time for req_time in rate_limit_storage[client_ip]
+        if current_time - req_time < 60
+    ]
+    
+    # Check rate limit
+    if len(rate_limit_storage[client_ip]) >= requests_per_minute:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "detail": "Rate limit exceeded. Please try again later.",
+                "retry_after": 60
+            }
+        )
+    
+    # Add current request
+    rate_limit_storage[client_ip].append(current_time)
+    
+    # Process request
+    response = await call_next(request)
+    return response
+
+# Authentication middleware function
+async def authentication_middleware(request: Request, call_next):
+    """Authentication middleware for API endpoints."""
+    api_key = os.getenv("API_KEY")
+    exempt_paths = {
+        "/",
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json"
+    }
+    
+    # Skip authentication for exempt paths
+    if request.url.path in exempt_paths:
+        return await call_next(request)
+    
+    # Check for API key in headers
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "detail": "Authorization header required",
+                "status": "error",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+    
+    # Validate API key
+    if not auth_header.startswith("Bearer "):
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "detail": "Invalid authorization header format",
+                "status": "error",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+    
+    api_key_from_header = auth_header.replace("Bearer ", "")
+    if api_key and api_key_from_header != api_key:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={
+                "detail": "Invalid API key",
+                "status": "error",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        )
+    
+    return await call_next(request)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -59,7 +171,10 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware for development
+# Add middleware
+app.middleware("http")(rate_limit_middleware)
+app.middleware("http")(authentication_middleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Configure appropriately for production
@@ -68,121 +183,318 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic models for requests/responses
+# Add trusted host middleware for production
+if os.getenv("ENVIRONMENT") == "production":
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["localhost", "127.0.0.1", "your-domain.com"]
+    )
+
+# Enhanced Pydantic models with validation
 class HealthResponse(BaseModel):
-    status: str
-    timestamp: datetime
-    version: str
-    database_status: str
+    status: str = Field(..., description="Health status")
+    timestamp: datetime = Field(..., description="Current timestamp")
+    version: str = Field(..., description="API version")
+    database_status: str = Field(..., description="Database status")
 
 class AppInfoResponse(BaseModel):
-    name: str
-    version: str
-    description: str
-    status: str
+    name: str = Field(..., description="Application name")
+    version: str = Field(..., description="Application version")
+    description: str = Field(..., description="Application description")
+    status: str = Field(..., description="Application status")
 
 class ConversationCreateRequest(BaseModel):
-    conversation_id: str
-    metadata: Optional[Dict[str, Any]] = None
+    conversation_id: str = Field(..., min_length=1, max_length=100, description="Unique conversation ID")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+
+    @validator('conversation_id')
+    def validate_conversation_id(cls, v):
+        if not v.strip():
+            raise ValueError('Conversation ID cannot be empty')
+        if len(v) > 100:
+            raise ValueError('Conversation ID too long')
+        # Check for valid characters
+        if not v.replace('-', '').replace('_', '').isalnum():
+            raise ValueError('Conversation ID can only contain alphanumeric characters, hyphens, and underscores')
+        return v.strip()
+
+    @validator('metadata')
+    def validate_metadata(cls, v):
+        if v is not None:
+            # Limit metadata size
+            if len(str(v)) > 1000:
+                raise ValueError('Metadata too large (max 1000 characters)')
+        return v
 
 class ConversationResponse(BaseModel):
-    conversation_id: str
-    phase: str
-    created_at: datetime
-    updated_at: datetime
-    message_count: int
+    conversation_id: str = Field(..., description="Conversation ID")
+    phase: str = Field(..., description="Current conversation phase")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    message_count: int = Field(..., ge=0, description="Number of messages")
 
 class MessageCreateRequest(BaseModel):
-    role: str
-    content: str
-    metadata: Optional[Dict[str, Any]] = None
+    role: str = Field(..., description="Message role (user, assistant, system)")
+    content: str = Field(..., min_length=1, max_length=10000, description="Message content")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+
+    @validator('role')
+    def validate_role(cls, v):
+        valid_roles = [role.value for role in MessageRole]
+        if v not in valid_roles:
+            raise ValueError(f'Invalid role. Must be one of: {valid_roles}')
+        return v
+
+    @validator('content')
+    def validate_content(cls, v):
+        if not v.strip():
+            raise ValueError('Message content cannot be empty')
+        if len(v) > 10000:
+            raise ValueError('Message content too long')
+        # Check for potentially harmful content
+        harmful_patterns = ['<script>', 'javascript:', 'data:text/html']
+        v_lower = v.lower()
+        for pattern in harmful_patterns:
+            if pattern in v_lower:
+                raise ValueError('Message content contains potentially harmful content')
+        return v.strip()
+
+    @validator('metadata')
+    def validate_metadata(cls, v):
+        if v is not None:
+            # Limit metadata size
+            if len(str(v)) > 1000:
+                raise ValueError('Metadata too large (max 1000 characters)')
+        return v
 
 class MessageResponse(BaseModel):
-    message_id: int
-    role: str
-    content: str
-    timestamp: datetime
-    metadata: Optional[Dict[str, Any]] = None
+    message_id: int = Field(..., description="Message ID")
+    role: str = Field(..., description="Message role")
+    content: str = Field(..., description="Message content")
+    timestamp: datetime = Field(..., description="Message timestamp")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
 
 class ToolCallCreateRequest(BaseModel):
-    tool_type: str
-    input_data: str
-    output_data: Optional[str] = None
-    status: str = "pending"
-    error_message: Optional[str] = None
+    tool_type: str = Field(..., description="Type of tool call")
+    input_data: str = Field(..., min_length=1, max_length=10000, description="Input data for tool")
+    output_data: Optional[str] = Field(None, max_length=50000, description="Output data from tool")
+    status: str = Field(default="pending", description="Tool call status")
+    error_message: Optional[str] = Field(None, max_length=1000, description="Error message if failed")
+
+    @validator('tool_type')
+    def validate_tool_type(cls, v):
+        valid_types = [tool_type.value for tool_type in ToolCallType]
+        if v not in valid_types:
+            raise ValueError(f'Invalid tool type. Must be one of: {valid_types}')
+        return v
+
+    @validator('status')
+    def validate_status(cls, v):
+        valid_statuses = ["pending", "running", "completed", "failed", "timeout"]
+        if v not in valid_statuses:
+            raise ValueError(f'Invalid status. Must be one of: {valid_statuses}')
+        return v
+
+    @validator('input_data')
+    def validate_input_data(cls, v):
+        if not v.strip():
+            raise ValueError('Input data cannot be empty')
+        if len(v) > 10000:
+            raise ValueError('Input data too long')
+        return v.strip()
+
+    @validator('output_data')
+    def validate_output_data(cls, v):
+        if v is not None and len(v) > 50000:
+            raise ValueError('Output data too long')
+        return v
+
+    @validator('error_message')
+    def validate_error_message(cls, v):
+        if v is not None and len(v) > 1000:
+            raise ValueError('Error message too long')
+        return v
 
 class ToolCallResponse(BaseModel):
-    tool_call_id: int
-    conversation_id: str
-    tool_type: str
-    input_data: str
-    output_data: Optional[str] = None
-    status: str
-    created_at: datetime
-    completed_at: Optional[datetime] = None
-    error_message: Optional[str] = None
+    tool_call_id: int = Field(..., description="Tool call ID")
+    conversation_id: str = Field(..., description="Conversation ID")
+    tool_type: str = Field(..., description="Tool type")
+    input_data: str = Field(..., description="Input data")
+    output_data: Optional[str] = Field(None, description="Output data")
+    status: str = Field(..., description="Status")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    completed_at: Optional[datetime] = Field(None, description="Completion timestamp")
+    error_message: Optional[str] = Field(None, description="Error message")
 
 class WebSourceCreateRequest(BaseModel):
-    url: str
-    title: Optional[str] = None
-    snippet: Optional[str] = None
-    relevance_score: Optional[float] = None
+    url: str = Field(..., description="Web source URL")
+    title: Optional[str] = Field(None, max_length=500, description="Web source title")
+    snippet: Optional[str] = Field(None, max_length=2000, description="Web source snippet")
+    relevance_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Relevance score")
+
+    @validator('url')
+    def validate_url(cls, v):
+        if not v.strip():
+            raise ValueError('URL cannot be empty')
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('URL must start with http:// or https://')
+        if len(v) > 2048:
+            raise ValueError('URL too long')
+        return v.strip()
+
+    @validator('title')
+    def validate_title(cls, v):
+        if v is not None and len(v) > 500:
+            raise ValueError('Title too long')
+        return v
+
+    @validator('snippet')
+    def validate_snippet(cls, v):
+        if v is not None and len(v) > 2000:
+            raise ValueError('Snippet too long')
+        return v
+
+    @validator('relevance_score')
+    def validate_relevance_score(cls, v):
+        if v is not None and (v < 0.0 or v > 1.0):
+            raise ValueError('Relevance score must be between 0.0 and 1.0')
+        return v
 
 class WebSourceResponse(BaseModel):
-    source_id: int
-    tool_call_id: int
-    url: str
-    title: Optional[str] = None
-    snippet: Optional[str] = None
-    relevance_score: Optional[float] = None
-    created_at: datetime
+    source_id: int = Field(..., description="Source ID")
+    tool_call_id: int = Field(..., description="Tool call ID")
+    url: str = Field(..., description="Web source URL")
+    title: Optional[str] = Field(None, description="Web source title")
+    snippet: Optional[str] = Field(None, description="Web source snippet")
+    relevance_score: Optional[float] = Field(None, description="Relevance score")
+    created_at: datetime = Field(..., description="Creation timestamp")
 
 class MashupCreateRequest(BaseModel):
-    title: str
-    description: Optional[str] = None
-    audio_file_path: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    title: str = Field(..., min_length=1, max_length=200, description="Mashup title")
+    description: Optional[str] = Field(None, max_length=1000, description="Mashup description")
+    audio_file_path: Optional[str] = Field(None, description="Audio file path")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+
+    @validator('title')
+    def validate_title(cls, v):
+        if not v.strip():
+            raise ValueError('Title cannot be empty')
+        if len(v) > 200:
+            raise ValueError('Title too long')
+        # Check for potentially harmful content
+        harmful_patterns = ['<script>', 'javascript:', 'data:text/html']
+        v_lower = v.lower()
+        for pattern in harmful_patterns:
+            if pattern in v_lower:
+                raise ValueError('Title contains potentially harmful content')
+        return v.strip()
+
+    @validator('description')
+    def validate_description(cls, v):
+        if v is not None and len(v) > 1000:
+            raise ValueError('Description too long')
+        return v
+
+    @validator('audio_file_path')
+    def validate_audio_file_path(cls, v):
+        if v is not None:
+            # Check for valid audio file extensions
+            valid_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg']
+            if not any(v.lower().endswith(ext) for ext in valid_extensions):
+                raise ValueError('Invalid audio file format. Supported formats: mp3, wav, flac, aac, ogg')
+        return v
+
+    @validator('metadata')
+    def validate_metadata(cls, v):
+        if v is not None:
+            # Limit metadata size
+            if len(str(v)) > 1000:
+                raise ValueError('Metadata too large (max 1000 characters)')
+        return v
 
 class MashupResponse(BaseModel):
-    mashup_id: int
-    conversation_id: str
-    title: str
-    description: Optional[str] = None
-    audio_file_path: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-    created_at: datetime
+    mashup_id: int = Field(..., description="Mashup ID")
+    conversation_id: str = Field(..., description="Conversation ID")
+    title: str = Field(..., description="Mashup title")
+    description: Optional[str] = Field(None, description="Mashup description")
+    audio_file_path: Optional[str] = Field(None, description="Audio file path")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+    created_at: datetime = Field(..., description="Creation timestamp")
 
 class ConversationSummaryResponse(BaseModel):
-    conversation_id: str
-    phase: str
-    created_at: datetime
-    updated_at: datetime
-    message_count: int
-    tool_call_count: int
-    mashup_count: int
-    web_source_count: int
+    conversation_id: str = Field(..., description="Conversation ID")
+    phase: str = Field(..., description="Current phase")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    message_count: int = Field(..., ge=0, description="Message count")
+    tool_call_count: int = Field(..., ge=0, description="Tool call count")
+    mashup_count: int = Field(..., ge=0, description="Mashup count")
+    web_source_count: int = Field(..., ge=0, description="Web source count")
 
-# Conversational API models
 class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    context: Optional[Dict[str, Any]] = None
+    message: str = Field(..., min_length=1, max_length=5000, description="User message")
+    session_id: Optional[str] = Field(None, max_length=100, description="Session ID")
+    context: Optional[Dict[str, Any]] = Field(None, description="Additional context")
+
+    @validator('message')
+    def validate_message(cls, v):
+        if not v.strip():
+            raise ValueError('Message cannot be empty')
+        if len(v) > 5000:
+            raise ValueError('Message too long')
+        # Check for potentially harmful content
+        harmful_patterns = ['<script>', 'javascript:', 'data:text/html']
+        v_lower = v.lower()
+        for pattern in harmful_patterns:
+            if pattern in v_lower:
+                raise ValueError('Message contains potentially harmful content')
+        return v.strip()
+
+    @validator('session_id')
+    def validate_session_id(cls, v):
+        if v is not None:
+            if len(v) > 100:
+                raise ValueError('Session ID too long')
+            if not v.replace('-', '').replace('_', '').isalnum():
+                raise ValueError('Session ID can only contain alphanumeric characters, hyphens, and underscores')
+        return v
+
+    @validator('context')
+    def validate_context(cls, v):
+        if v is not None:
+            # Limit context size
+            if len(str(v)) > 2000:
+                raise ValueError('Context too large (max 2000 characters)')
+        return v
 
 class ChatResponse(BaseModel):
-    response: str
-    session_id: str
-    phase: str
-    phase_transition: bool
-    new_phase: Optional[str] = None
-    context: Dict[str, Any]
-    tool_results: Optional[Dict[str, Any]] = None
-    timestamp: datetime
+    response: str = Field(..., description="AI response")
+    session_id: str = Field(..., description="Session ID")
+    phase: str = Field(..., description="Current conversation phase")
+    phase_transition: bool = Field(..., description="Whether phase transition occurred")
+    new_phase: Optional[str] = Field(None, description="New phase if transition occurred")
+    context: Dict[str, Any] = Field(..., description="Conversation context")
+    tool_results: Optional[Dict[str, Any]] = Field(None, description="Tool execution results")
+    timestamp: datetime = Field(..., description="Response timestamp")
 
 class ToolStatisticsResponse(BaseModel):
-    total_tool_calls: int
-    successful_calls: int
-    failed_calls: int
-    success_rate: float
+    total_tool_calls: int = Field(..., ge=0, description="Total tool calls")
+    successful_calls: int = Field(..., ge=0, description="Successful tool calls")
+    failed_calls: int = Field(..., ge=0, description="Failed tool calls")
+    success_rate: float = Field(..., ge=0.0, le=1.0, description="Success rate")
+    average_response_time: Optional[float] = Field(None, ge=0.0, description="Average response time in seconds")
+
+class StandardResponse(BaseModel):
+    status: str = Field(..., description="Response status")
+    message: str = Field(..., description="Response message")
+    data: Optional[Dict[str, Any]] = Field(None, description="Response data")
+    timestamp: datetime = Field(..., description="Response timestamp")
+
+class ErrorResponse(BaseModel):
+    status: str = Field(default="error", description="Error status")
+    message: str = Field(..., description="Error message")
+    detail: Optional[str] = Field(None, description="Error detail")
+    timestamp: datetime = Field(..., description="Error timestamp")
 
 # Dependency injection functions
 async def get_db():
@@ -211,7 +523,7 @@ async def get_conversation_agent():
         enable_tools=True
     )
 
-# Root endpoint
+# Root endpoint with enhanced response
 @app.get("/", response_model=AppInfoResponse)
 async def root():
     """Root endpoint with app information"""
@@ -222,7 +534,7 @@ async def root():
         status="running"
     )
 
-# Health check endpoint
+# Enhanced health check endpoint
 @app.get("/health", response_model=HealthResponse)
 async def health_check(db: AsyncConversationDB = Depends(get_db)):
     """Health check endpoint with database status"""
@@ -241,13 +553,13 @@ async def health_check(db: AsyncConversationDB = Depends(get_db)):
         database_status=db_status
     )
 
-# Basic conversation endpoints
+# Enhanced conversation endpoints with validation
 @app.post("/conversations", response_model=ConversationResponse)
 async def create_conversation(
     request: ConversationCreateRequest,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Create a new conversation"""
+    """Create a new conversation with enhanced validation"""
     try:
         success = await db.create_conversation(
             request.conversation_id,
@@ -271,6 +583,8 @@ async def create_conversation(
             updated_at=conversation["updated_at"],
             message_count=len(messages)
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating conversation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -280,8 +594,12 @@ async def get_conversation(
     conversation_id: str,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Get conversation details"""
+    """Get conversation details with validation"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         conversation = await db.get_conversation(conversation_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -302,15 +620,19 @@ async def get_conversation(
         logger.error(f"Error getting conversation: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Message operations
+# Enhanced message operations with validation
 @app.post("/conversations/{conversation_id}/messages", response_model=MessageResponse)
 async def add_message(
     conversation_id: str,
     request: MessageCreateRequest,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Add a message to a conversation"""
+    """Add a message to a conversation with enhanced validation"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         # Validate role
         if request.role not in [role.value for role in MessageRole]:
             raise HTTPException(status_code=400, detail="Invalid message role")
@@ -347,12 +669,16 @@ async def add_message(
 @app.get("/conversations/{conversation_id}/messages", response_model=List[MessageResponse])
 async def get_messages(
     conversation_id: str,
-    limit: Optional[int] = None,
-    offset: int = 0,
+    limit: Optional[int] = Query(None, ge=1, le=100, description="Number of messages to retrieve"),
+    offset: int = Query(0, ge=0, description="Number of messages to skip"),
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Get messages for a conversation"""
+    """Get messages for a conversation with pagination"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         messages = await db.get_messages(conversation_id, limit=limit, offset=offset)
         return [
             MessageResponse(
@@ -365,19 +691,25 @@ async def get_messages(
             )
             for msg in messages
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting messages: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Tool call operations
+# Enhanced tool call operations
 @app.post("/conversations/{conversation_id}/tool-calls", response_model=ToolCallResponse)
 async def add_tool_call(
     conversation_id: str,
     request: ToolCallCreateRequest,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Add a tool call to a conversation"""
+    """Add a tool call to a conversation with enhanced validation"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         # Validate tool type
         if request.tool_type not in [tool_type.value for tool_type in ToolCallType]:
             raise HTTPException(status_code=400, detail="Invalid tool type")
@@ -415,14 +747,14 @@ async def add_tool_call(
         logger.error(f"Error adding tool call: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Web source operations
+# Enhanced web source operations
 @app.post("/tool-calls/{tool_call_id}/web-sources", response_model=WebSourceResponse)
 async def add_web_source(
     tool_call_id: int,
     request: WebSourceCreateRequest,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Add a web source to a tool call"""
+    """Add a web source to a tool call with enhanced validation"""
     try:
         success = await db.add_web_source(
             tool_call_id,
@@ -450,15 +782,19 @@ async def add_web_source(
         logger.error(f"Error adding web source: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Mashup operations
+# Enhanced mashup operations
 @app.post("/conversations/{conversation_id}/mashups", response_model=MashupResponse)
 async def create_mashup(
     conversation_id: str,
     request: MashupCreateRequest,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Create a mashup for a conversation"""
+    """Create a mashup for a conversation with enhanced validation"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         mashup_id = await db.create_mashup(
             conversation_id,
             request.title,
@@ -485,14 +821,18 @@ async def create_mashup(
         logger.error(f"Error creating mashup: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Conversation summary
+# Enhanced conversation summary
 @app.get("/conversations/{conversation_id}/summary", response_model=ConversationSummaryResponse)
 async def get_conversation_summary(
     conversation_id: str,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Get a comprehensive summary of a conversation"""
+    """Get a comprehensive summary of a conversation with validation"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         summary = await db.get_conversation_summary(conversation_id)
         if not summary:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -513,15 +853,19 @@ async def get_conversation_summary(
         logger.error(f"Error getting conversation summary: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Phase management
+# Enhanced phase management
 @app.put("/conversations/{conversation_id}/phase")
 async def update_conversation_phase(
     conversation_id: str,
-    phase: str,
+    phase: str = Query(..., description="New conversation phase"),
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Update the phase of a conversation"""
+    """Update the phase of a conversation with validation"""
     try:
+        # Validate conversation_id
+        if not conversation_id.strip():
+            raise HTTPException(status_code=400, detail="Conversation ID cannot be empty")
+        
         # Validate phase
         if phase not in [phase.value for phase in ConversationPhase]:
             raise HTTPException(status_code=400, detail="Invalid conversation phase")
@@ -533,50 +877,63 @@ async def update_conversation_phase(
         if not success:
             raise HTTPException(status_code=400, detail="Failed to update conversation phase")
         
-        return {"message": "Conversation phase updated successfully"}
+        return StandardResponse(
+            status="success",
+            message="Conversation phase updated successfully",
+            timestamp=datetime.now(timezone.utc)
+        )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error updating conversation phase: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Web search endpoints
+# Enhanced web search endpoints
 @app.get("/api/v1/web-search/status")
 async def get_web_search_status(
     web_search: AsyncWebSearchService = Depends(get_web_search_service)
 ):
-    """Get web search service status"""
+    """Get web search service status with enhanced response"""
     try:
         status = web_search.get_service_status()
-        return {
-            "status": "success",
-            "data": status
-        }
+        return StandardResponse(
+            status="success",
+            message="Web search status retrieved successfully",
+            data=status,
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Error getting web search status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+class WebSearchRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500, description="Search query")
+    context: Optional[Dict[str, Any]] = Field(None, description="Search context")
+
 @app.post("/api/v1/web-search/search")
 async def search_educational_content(
-    query: str,
-    context: Optional[Dict[str, Any]] = None,
+    request: WebSearchRequest,
     web_search: AsyncWebSearchService = Depends(get_web_search_service)
 ):
-    """Search for educational content"""
+    """Search for educational content with enhanced validation"""
     try:
-        if context is None:
+        if request.context is None:
             context = {}
+        else:
+            context = request.context
         
-        result = await web_search.search_educational_content(query, context)
-        return {
-            "status": "success",
-            "data": result
-        }
+        result = await web_search.search_educational_content(request.query, context)
+        return StandardResponse(
+            status="success",
+            message="Educational content search completed successfully",
+            data=result,
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Error in web search: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Conversational API endpoints
+# Enhanced conversational API endpoints
 @app.post("/api/v1/chat", response_model=ChatResponse)
 async def chat_with_agent(
     request: ChatRequest,
@@ -622,8 +979,12 @@ async def get_conversation_session(
     session_id: str,
     db: AsyncConversationDB = Depends(get_db)
 ):
-    """Get conversation session information."""
+    """Get conversation session information with validation"""
     try:
+        # Validate session_id
+        if not session_id.strip():
+            raise HTTPException(status_code=400, detail="Session ID cannot be empty")
+        
         conversation = await db.get_conversation(session_id)
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -634,12 +995,17 @@ async def get_conversation_session(
         # Get tool statistics
         tool_stats = await db.get_conversation_tool_calls(session_id, limit=5)
         
-        return {
-            "session_id": session_id,
-            "conversation": conversation,
-            "recent_messages": messages,
-            "tool_calls": tool_stats
-        }
+        return StandardResponse(
+            status="success",
+            message="Session information retrieved successfully",
+            data={
+                "session_id": session_id,
+                "conversation": conversation,
+                "recent_messages": messages,
+                "tool_calls": tool_stats
+            },
+            timestamp=datetime.now(timezone.utc)
+        )
         
     except HTTPException:
         raise
@@ -649,10 +1015,10 @@ async def get_conversation_session(
 
 @app.get("/api/v1/tools/statistics", response_model=ToolStatisticsResponse)
 async def get_tool_statistics(
-    session_id: Optional[str] = None,
+    session_id: Optional[str] = Query(None, description="Optional session ID for filtering"),
     tool_orchestrator: AsyncToolOrchestrator = Depends(get_tool_orchestrator_dep)
 ):
-    """Get tool usage statistics."""
+    """Get tool usage statistics with validation"""
     try:
         stats = await tool_orchestrator.get_tool_statistics(session_id)
         
@@ -671,159 +1037,231 @@ async def get_tool_statistics(
 async def get_tools_status(
     tool_orchestrator: AsyncToolOrchestrator = Depends(get_tool_orchestrator_dep)
 ):
-    """Get status of all available tools."""
+    """Get status of all available tools with enhanced response"""
     try:
         web_search_available = await tool_orchestrator.is_web_search_available()
         
-        return {
-            "web_search": {
-                "available": web_search_available,
-                "service": "Tavily API"
+        return StandardResponse(
+            status="success",
+            message="Tools status retrieved successfully",
+            data={
+                "web_search": {
+                    "available": web_search_available,
+                    "service": "Tavily API"
+                },
+                "tool_orchestrator": {
+                    "available": True,
+                    "max_concurrent_tools": tool_orchestrator.max_concurrent_tools,
+                    "tool_timeout": tool_orchestrator.tool_timeout
+                }
             },
-            "tool_orchestrator": {
-                "available": True,
-                "max_concurrent_tools": tool_orchestrator.max_concurrent_tools,
-                "tool_timeout": tool_orchestrator.tool_timeout
-            }
-        }
+            timestamp=datetime.now(timezone.utc)
+        )
         
     except Exception as e:
         logger.error(f"Error getting tools status: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-# Database utility endpoints
+# Enhanced database utility endpoints
 @app.post("/admin/database/backup")
 async def create_database_backup(
-    backup_name: Optional[str] = None,
+    backup_name: Optional[str] = Query(None, max_length=100, description="Optional backup name"),
     settings: Any = Depends(get_settings_dep)
 ):
-    """Create a database backup"""
+    """Create a database backup with enhanced response"""
     try:
         utils = DatabaseUtils(settings.DATABASE_PATH)
         backup_path = await utils.create_backup(backup_name)
-        return {
-            "message": "Database backup created successfully",
-            "backup_path": backup_path
-        }
+        return StandardResponse(
+            status="success",
+            message="Database backup created successfully",
+            data={"backup_path": backup_path},
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to create database backup: {e}")
         raise HTTPException(status_code=500, detail="Failed to create database backup")
 
 @app.get("/admin/database/backups")
 async def list_database_backups(settings: Any = Depends(get_settings_dep)):
-    """List available database backups"""
+    """List available database backups with enhanced response"""
     try:
         utils = DatabaseUtils(settings.DATABASE_PATH)
         backups = await utils.list_backups()
-        return {"backups": backups}
+        return StandardResponse(
+            status="success",
+            message="Database backups retrieved successfully",
+            data={"backups": backups},
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to list database backups: {e}")
         raise HTTPException(status_code=500, detail="Failed to list database backups")
 
 @app.post("/admin/database/restore")
 async def restore_database_backup(
-    backup_path: str,
+    backup_path: str = Query(..., description="Path to backup file"),
     settings: Any = Depends(get_settings_dep)
 ):
-    """Restore database from backup"""
+    """Restore database from backup with enhanced response"""
     try:
         utils = DatabaseUtils(settings.DATABASE_PATH)
         success = await utils.restore_backup(backup_path)
         if success:
-            return {"message": "Database restored successfully"}
+            return StandardResponse(
+                status="success",
+                message="Database restored successfully",
+                timestamp=datetime.now(timezone.utc)
+            )
         else:
             raise HTTPException(status_code=400, detail="Failed to restore database")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to restore database: {e}")
         raise HTTPException(status_code=500, detail="Failed to restore database")
 
 @app.get("/admin/database/info")
 async def get_database_info(settings: Any = Depends(get_settings_dep)):
-    """Get database information and statistics"""
+    """Get database information and statistics with enhanced response"""
     try:
         utils = DatabaseUtils(settings.DATABASE_PATH)
         info = await utils.get_database_info()
-        return info
+        return StandardResponse(
+            status="success",
+            message="Database information retrieved successfully",
+            data=info,
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to get database info: {e}")
         raise HTTPException(status_code=500, detail="Failed to get database info")
 
 @app.get("/admin/database/integrity")
 async def validate_database_integrity(settings: Any = Depends(get_settings_dep)):
-    """Validate database integrity"""
+    """Validate database integrity with enhanced response"""
     try:
         utils = DatabaseUtils(settings.DATABASE_PATH)
         integrity = await utils.validate_database_integrity()
-        return integrity
+        return StandardResponse(
+            status="success",
+            message="Database integrity validation completed",
+            data=integrity,
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to validate database integrity: {e}")
         raise HTTPException(status_code=500, detail="Failed to validate database integrity")
 
 @app.post("/admin/database/optimize")
 async def optimize_database(settings: Any = Depends(get_settings_dep)):
-    """Optimize database performance"""
+    """Optimize database performance with enhanced response"""
     try:
         utils = DatabaseUtils(settings.DATABASE_PATH)
         success = await utils.optimize_database()
         if success:
-            return {"message": "Database optimization completed successfully"}
+            return StandardResponse(
+                status="success",
+                message="Database optimization completed successfully",
+                timestamp=datetime.now(timezone.utc)
+            )
         else:
             raise HTTPException(status_code=400, detail="Failed to optimize database")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to optimize database: {e}")
         raise HTTPException(status_code=500, detail="Failed to optimize database")
 
 @app.get("/admin/database/metrics")
 async def get_database_metrics(settings: Any = Depends(get_settings_dep)):
-    """Get database performance metrics"""
+    """Get database performance metrics with enhanced response"""
     try:
         monitor = DatabasePerformanceMonitor(settings.DATABASE_PATH)
         metrics = await monitor.collect_metrics()
-        return metrics
+        return StandardResponse(
+            status="success",
+            message="Database metrics retrieved successfully",
+            data=metrics,
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to collect database metrics: {e}")
         raise HTTPException(status_code=500, detail="Failed to collect database metrics")
 
 @app.get("/admin/database/metrics/history")
 async def get_database_metrics_history(
-    limit: Optional[int] = None,
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Number of history entries to retrieve"),
     settings: Any = Depends(get_settings_dep)
 ):
-    """Get database metrics history"""
+    """Get database metrics history with enhanced response"""
     try:
         monitor = DatabasePerformanceMonitor(settings.DATABASE_PATH)
         history = monitor.get_metrics_history(limit)
-        return {"metrics_history": history}
+        return StandardResponse(
+            status="success",
+            message="Database metrics history retrieved successfully",
+            data={"metrics_history": history},
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to get database metrics history: {e}")
         raise HTTPException(status_code=500, detail="Failed to get database metrics history")
 
 @app.get("/admin/database/metrics/summary")
 async def get_database_performance_summary(settings: Any = Depends(get_settings_dep)):
-    """Get database performance summary"""
+    """Get database performance summary with enhanced response"""
     try:
         monitor = DatabasePerformanceMonitor(settings.DATABASE_PATH)
         summary = monitor.get_performance_summary()
-        return summary
+        return StandardResponse(
+            status="success",
+            message="Database performance summary retrieved successfully",
+            data=summary,
+            timestamp=datetime.now(timezone.utc)
+        )
     except Exception as e:
         logger.error(f"Failed to get database performance summary: {e}")
         raise HTTPException(status_code=500, detail="Failed to get database performance summary")
 
-# Error handling middleware
+# Enhanced error handling middleware
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    """Global exception handler"""
+    """Global exception handler with enhanced error response"""
     logger.error(f"Unhandled exception: {exc}")
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error"}
+        content={
+            "status": "error",
+            "message": "Internal server error",
+            "detail": str(exc) if os.getenv("ENVIRONMENT") == "development" else None,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
     )
 
 @app.exception_handler(ValidationError)
 async def validation_exception_handler(request, exc):
-    """Validation error handler"""
+    """Validation error handler with enhanced error response"""
     logger.error(f"Validation error: {exc}")
     return JSONResponse(
         status_code=400,
-        content={"detail": str(exc)}
+        content={
+            "status": "error",
+            "message": "Validation error",
+            "detail": str(exc),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """HTTP exception handler with enhanced error response"""
+    logger.error(f"HTTP exception: {exc}")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "error",
+            "message": exc.detail,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
     )
