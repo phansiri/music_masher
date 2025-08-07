@@ -2,7 +2,63 @@
 
 This directory contains example scripts demonstrating the functionality of the Lit Music Mashup platform.
 
-## Conversation Agent Demo
+## 🧪 Tavily API Integration Test
+
+### `test_tavily_integration.py`
+
+**🎯 Purpose**: Test your Tavily API key integration and verify that web search functionality is working correctly with the conversational AI agent.
+
+**🚀 Quick Start:**
+```bash
+# 1. Copy environment file
+cp env.example .env
+
+# 2. Add your Tavily API key to .env
+# Edit .env and add: TAVILY_API_KEY=your_actual_tavily_api_key_here
+
+# 3. Run the test
+python examples/test_tavily_integration.py
+```
+
+**🔍 What this test does:**
+1. **Configuration Validation**: Checks your .env setup and API key
+2. **Web Search Service**: Tests direct Tavily API integration
+3. **Tool Orchestrator**: Tests concurrent search execution
+4. **Conversational Agent**: Tests full AI agent with web search integration
+
+**✅ Expected Results:**
+```
+🧪 Lit Music Mashup AI - Tavily Integration Test Suite
+======================================================================
+
+🔧 Test 1: Configuration and API Key Validation
+✅ Configuration test passed!
+
+🌐 Test 2: Direct Web Search Service Testing
+✅ Search completed successfully!
+
+🛠️  Test 3: Tool Orchestrator Integration  
+✅ Concurrent searches completed!
+
+🤖 Test 4: Conversational AI Agent with Tavily Integration
+✅ Agent Response Received!
+
+🏁 Final Test Results
+🎯 Overall Result: ✅ ALL TESTS PASSED
+```
+
+**🔧 Setup Requirements:**
+- Valid Tavily API key (get free key at https://tavily.com/)
+- .env file with TAVILY_API_KEY configured
+- Internet connection for web search functionality
+
+**🎉 Benefits:**
+- Verify your API key is working
+- Test all web search functionality  
+- Validate the full conversational AI pipeline
+- Get educational search results in real-time
+
+## 🤖 Conversation Agent Demo
 
 ### `conversation_agent_demo.py`
 
