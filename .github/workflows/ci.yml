@@ -41,7 +41,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv sync --frozen --no-cache
+        uv sync --frozen --no-cache --all-extras
 
     - name: Run linting
       run: |
@@ -125,10 +125,10 @@ jobs:
 
     - name: Test Docker Compose configurations
       run: |
-        docker-compose -f docker-compose.dev.yml config
-        docker-compose -f docker-compose.prod.yml config
-        docker-compose -f docker-compose.dev-with-ollama.yml config
-        docker-compose -f docker-compose.prod-with-ollama.yml config
+        docker compose -f docker-compose.dev.yml config
+        docker compose -f docker-compose.prod.yml config
+        docker compose -f docker-compose.dev-with-ollama.yml config
+        docker compose -f docker-compose.prod-with-ollama.yml config
 
   deploy-staging:
     runs-on: ubuntu-latest

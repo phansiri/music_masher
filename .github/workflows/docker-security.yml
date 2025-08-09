@@ -62,12 +62,12 @@ jobs:
 
     - name: Validate Docker Compose files
       run: |
-        docker-compose -f docker-compose.yml config
-        docker-compose -f docker-compose.dev.yml config
-        docker-compose -f docker-compose.prod.yml config
-        docker-compose -f docker-compose.dev-with-ollama.yml config
-        docker-compose -f docker-compose.prod-with-ollama.yml config
-        docker-compose -f docker-compose.with-ollama.yml config
+        docker compose -f docker-compose.yml config
+        docker compose -f docker-compose.dev.yml config
+        docker compose -f docker-compose.prod.yml config
+        docker compose -f docker-compose.dev-with-ollama.yml config
+        docker compose -f docker-compose.prod-with-ollama.yml config
+        docker compose -f docker-compose.with-ollama.yml config
 
   dependency-scan:
     runs-on: ubuntu-latest
@@ -85,7 +85,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        uv sync --frozen --no-cache
+        uv sync --frozen --no-cache --all-extras
 
     - name: Run safety check
       run: |
