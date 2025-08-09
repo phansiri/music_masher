@@ -17,7 +17,21 @@ import asyncio
 from app.db import AsyncConversationDB, ConversationPhase, MessageRole, ToolCallType
 from app.db.utils import DatabaseUtils, DatabasePerformanceMonitor
 from app.config import get_settings
-from app.services import AsyncWebSearchService, get_web_search_service, AsyncToolOrchestrator, get_tool_orchestrator
+from app.services import (
+    AsyncWebSearchService, 
+    get_web_search_service, 
+    AsyncToolOrchestrator, 
+    get_tool_orchestrator,
+    AsyncEnhancedGenerationService,
+    get_generation_service_dep,
+    GenerationRequest,
+    GenerationResponse,
+    ContentType,
+    SkillLevel,
+    ContentQuality,
+    ContentValidationResult,
+    QualityMetrics
+)
 from app.agents.conversation_agent import AsyncConversationalMashupAgent
 
 # Configure logging
@@ -608,6 +622,156 @@ class ErrorResponse(BaseModel):
                 "message": "Validation failed",
                 "detail": "Input validation failed for field 'message'",
                 "timestamp": "2024-01-01T00:00:00Z"
+            }
+        }
+    )
+
+# Content Generation Models
+class ContentGenerationRequest(BaseModel):
+    """Request model for content generation."""
+    prompt: str = Field(..., min_length=1, max_length=5000, description="Generation prompt", example="Create a beginner lesson about jazz music")
+    content_type: ContentType = Field(..., description="Type of content to generate", example=ContentType.THEORY_LESSON)
+    skill_level: SkillLevel = Field(..., description="Target skill level", example=SkillLevel.BEGINNER)
+    context: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context for generation")
+    session_id: Optional[str] = Field(None, max_length=100, description="Session ID for tracking")
+    conversation_id: Optional[str] = Field(None, max_length=100, description="Conversation ID for tracking")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "prompt": "Create a beginner lesson about jazz music",
+                "content_type": "theory_lesson",
+                "skill_level": "beginner",
+                "context": {
+                    "genre": "jazz",
+                    "learning_objectives": "Understand basic jazz concepts",
+                    "target_audience": "music students"
+                },
+                "session_id": "session_20240101_120000",
+                "conversation_id": "conv_123"
+            }
+        }
+    )
+
+class ContentGenerationResponse(BaseModel):
+    """Response model for generated content."""
+    content: str = Field(..., description="Generated content")
+    content_type: ContentType = Field(..., description="Type of generated content")
+    skill_level: SkillLevel = Field(..., description="Target skill level")
+    quality_score: float = Field(..., ge=0.0, le=10.0, description="Quality score (0-10)")
+    quality_level: ContentQuality = Field(..., description="Quality level assessment")
+    confidence_score: float = Field(..., ge=0.0, le=1.0, description="Confidence in generation")
+    generation_time: float = Field(..., ge=0.0, description="Generation time in seconds")
+    model_used: str = Field(..., description="Model used for generation")
+    suggestions: List[str] = Field(default_factory=list, description="Improvement suggestions")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    timestamp: datetime = Field(..., description="Generation timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "content": "# Beginner's Guide to Jazz Music\n\nWelcome to your introduction to jazz music!",
+                "content_type": "theory_lesson",
+                "skill_level": "beginner",
+                "quality_score": 7.5,
+                "quality_level": "good",
+                "confidence_score": 0.85,
+                "generation_time": 35.96,
+                "model_used": "mistral-small3.2:latest",
+                "suggestions": ["Consider adding more examples", "Enhance cultural context"],
+                "metadata": {"prompt_length": 150, "content_length": 1200},
+                "timestamp": "2024-01-01T12:00:00Z"
+            }
+        }
+    )
+
+class ContentValidationRequest(BaseModel):
+    """Request model for content validation."""
+    content: str = Field(..., min_length=1, max_length=50000, description="Content to validate")
+    skill_level: SkillLevel = Field(..., description="Target skill level")
+    content_type: Optional[ContentType] = Field(None, description="Type of content")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "content": "# Music Theory Lesson\n\nThis lesson covers basic concepts...",
+                "skill_level": "beginner",
+                "content_type": "theory_lesson"
+            }
+        }
+    )
+
+class ContentValidationResponse(BaseModel):
+    """Response model for content validation."""
+    is_appropriate: bool = Field(..., description="Whether content is appropriate")
+    cultural_sensitivity_score: float = Field(..., ge=0.0, le=1.0, description="Cultural sensitivity score")
+    educational_value_score: float = Field(..., ge=0.0, le=1.0, description="Educational value score")
+    age_appropriateness: bool = Field(..., description="Whether content is age appropriate")
+    issues: List[str] = Field(default_factory=list, description="Identified issues")
+    suggestions: List[str] = Field(default_factory=list, description="Improvement suggestions")
+    timestamp: datetime = Field(..., description="Validation timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "is_appropriate": True,
+                "cultural_sensitivity_score": 0.9,
+                "educational_value_score": 0.8,
+                "age_appropriateness": True,
+                "issues": [],
+                "suggestions": ["Consider adding more examples"],
+                "timestamp": "2024-01-01T12:00:00Z"
+            }
+        }
+    )
+
+class GenerationStatusResponse(BaseModel):
+    """Response model for generation service status."""
+    service: str = Field(..., description="Service name")
+    status: str = Field(..., description="Service status")
+    ollama_available: bool = Field(..., description="Whether Ollama is available")
+    models_available: int = Field(..., ge=0, description="Number of available models")
+    generation_stats: Dict[str, Any] = Field(..., description="Generation statistics")
+    timestamp: datetime = Field(..., description="Status timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "service": "generation",
+                "status": "healthy",
+                "ollama_available": True,
+                "models_available": 8,
+                "generation_stats": {
+                    "total_generations": 10,
+                    "successful_generations": 9,
+                    "failed_generations": 1,
+                    "average_generation_time": 45.2
+                },
+                "timestamp": "2024-01-01T12:00:00Z"
+            }
+        }
+    )
+
+class GenerationMetricsResponse(BaseModel):
+    """Response model for generation quality metrics."""
+    educational_value: float = Field(..., ge=0.0, le=10.0, description="Educational value score")
+    cultural_accuracy: float = Field(..., ge=0.0, le=10.0, description="Cultural accuracy score")
+    engagement_level: float = Field(..., ge=0.0, le=10.0, description="Engagement level score")
+    content_relevance: float = Field(..., ge=0.0, le=10.0, description="Content relevance score")
+    overall_score: float = Field(..., ge=0.0, le=10.0, description="Overall quality score")
+    confidence_level: float = Field(..., ge=0.0, le=1.0, description="Confidence in scoring")
+    timestamp: datetime = Field(..., description="Metrics timestamp")
+    
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "educational_value": 7.5,
+                "cultural_accuracy": 8.0,
+                "engagement_level": 6.5,
+                "content_relevance": 7.0,
+                "overall_score": 7.25,
+                "confidence_level": 0.85,
+                "timestamp": "2024-01-01T12:00:00Z"
             }
         }
     )
@@ -1336,6 +1500,142 @@ async def get_database_performance_summary(settings: Any = Depends(get_settings_
     except Exception as e:
         logger.error(f"Failed to get database performance summary: {e}")
         raise HTTPException(status_code=500, detail="Failed to get database performance summary")
+
+# Content Generation Endpoints
+@app.post("/api/v1/generate/content", response_model=ContentGenerationResponse, tags=["Generation"])
+async def generate_educational_content(
+    request: ContentGenerationRequest,
+    generation_service: AsyncEnhancedGenerationService = Depends(get_generation_service_dep),
+    db: AsyncConversationDB = Depends(get_db)
+):
+    """Generate educational content using the enhanced generation service."""
+    try:
+        # Convert request to GenerationRequest
+        generation_request = GenerationRequest(
+            prompt=request.prompt,
+            content_type=request.content_type,
+            skill_level=request.skill_level,
+            context=request.context,
+            session_id=request.session_id,
+            conversation_id=request.conversation_id
+        )
+        
+        # Generate content
+        response = await generation_service.generate_with_context(generation_request)
+        
+        # Convert response to API format
+        return ContentGenerationResponse(
+            content=response.content,
+            content_type=response.content_type,
+            skill_level=response.skill_level,
+            quality_score=response.quality_score,
+            quality_level=response.quality_level,
+            confidence_score=response.confidence_score,
+            generation_time=response.generation_time,
+            model_used=response.model_used,
+            suggestions=response.suggestions,
+            metadata=response.metadata,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+    except Exception as e:
+        logger.error(f"Content generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Content generation failed: {str(e)}")
+
+@app.post("/api/v1/validate/content", response_model=ContentValidationResponse, tags=["Generation"])
+async def validate_educational_content(
+    request: ContentValidationRequest,
+    generation_service: AsyncEnhancedGenerationService = Depends(get_generation_service_dep)
+):
+    """Validate educational content for appropriateness and quality."""
+    try:
+        # Validate content using the generation service
+        validation_result = await generation_service.content_validator.validate_content(
+            request.content, request.skill_level
+        )
+        
+        return ContentValidationResponse(
+            is_appropriate=validation_result.is_appropriate,
+            cultural_sensitivity_score=validation_result.cultural_sensitivity_score,
+            educational_value_score=validation_result.educational_value_score,
+            age_appropriateness=validation_result.age_appropriateness,
+            issues=validation_result.issues,
+            suggestions=validation_result.suggestions,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+    except Exception as e:
+        logger.error(f"Content validation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Content validation failed: {str(e)}")
+
+@app.get("/api/v1/generation/status", response_model=GenerationStatusResponse, tags=["Generation"])
+async def get_generation_status(
+    generation_service: AsyncEnhancedGenerationService = Depends(get_generation_service_dep)
+):
+    """Get the status of the generation service."""
+    try:
+        health = await generation_service.health_check()
+        
+        return GenerationStatusResponse(
+            service="generation",
+            status=health["status"],
+            ollama_available=health["ollama_available"],
+            models_available=health["models_available"],
+            generation_stats=health["generation_stats"],
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get generation status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get generation status: {str(e)}")
+
+@app.post("/api/v1/generation/metrics", response_model=GenerationMetricsResponse, tags=["Generation"])
+async def get_content_quality_metrics(
+    request: ContentValidationRequest,
+    generation_service: AsyncEnhancedGenerationService = Depends(get_generation_service_dep)
+):
+    """Get quality metrics for educational content."""
+    try:
+        # Score content quality
+        quality_metrics = await generation_service.quality_scorer.score_content(
+            request.content,
+            request.content_type or ContentType.THEORY_LESSON,
+            request.skill_level,
+            {}  # Empty context for metrics endpoint
+        )
+        
+        return GenerationMetricsResponse(
+            educational_value=quality_metrics.educational_value,
+            cultural_accuracy=quality_metrics.cultural_accuracy,
+            engagement_level=quality_metrics.engagement_level,
+            content_relevance=quality_metrics.content_relevance,
+            overall_score=quality_metrics.overall_score,
+            confidence_level=quality_metrics.confidence_level,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get quality metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get quality metrics: {str(e)}")
+
+@app.get("/api/v1/generation/models", tags=["Generation"])
+async def get_available_models(
+    generation_service: AsyncEnhancedGenerationService = Depends(get_generation_service_dep)
+):
+    """Get list of available Ollama models."""
+    try:
+        models = await generation_service.get_available_models()
+        
+        return StandardResponse(
+            status="success",
+            message="Available models retrieved successfully",
+            data={"models": models, "count": len(models)},
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to get available models: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get available models: {str(e)}")
 
 # Enhanced error handling middleware
 @app.exception_handler(Exception)
