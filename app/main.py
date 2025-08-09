@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, ConfigDict, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, validator, field_validator, ValidationError
 from typing import Optional, Dict, Any, List
 import logging
 import os
@@ -16,7 +16,6 @@ import asyncio
 # Import database components
 from app.db import AsyncConversationDB, ConversationPhase, MessageRole, ToolCallType
 from app.db.utils import DatabaseUtils, DatabasePerformanceMonitor
-from app.db.validation import ValidationError
 from app.config import get_settings
 from app.services import AsyncWebSearchService, get_web_search_service, AsyncToolOrchestrator, get_tool_orchestrator
 from app.agents.conversation_agent import AsyncConversationalMashupAgent
@@ -390,29 +389,37 @@ class WebSourceCreateRequest(BaseModel):
     snippet: Optional[str] = Field(None, max_length=2000, description="Web source snippet")
     relevance_score: Optional[float] = Field(None, ge=0.0, le=1.0, description="Relevance score")
 
-    @validator('url')
-    def validate_url(cls, v):
-        if not v.strip():
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        if not v or not v.strip():
             raise ValueError('URL cannot be empty')
+        v = v.strip()
         if not v.startswith(('http://', 'https://')):
             raise ValueError('URL must start with http:// or https://')
         if len(v) > 2048:
             raise ValueError('URL too long')
-        return v.strip()
+        # Additional validation for URL format
+        if ' ' in v or '\n' in v or '\t' in v:
+            raise ValueError('URL contains invalid characters')
+        return v
 
-    @validator('title')
+    @field_validator('title')
+    @classmethod
     def validate_title(cls, v):
         if v is not None and len(v) > 500:
             raise ValueError('Title too long')
         return v
 
-    @validator('snippet')
+    @field_validator('snippet')
+    @classmethod
     def validate_snippet(cls, v):
         if v is not None and len(v) > 2000:
             raise ValueError('Snippet too long')
         return v
 
-    @validator('relevance_score')
+    @field_validator('relevance_score')
+    @classmethod
     def validate_relevance_score(cls, v):
         if v is not None and (v < 0.0 or v > 1.0):
             raise ValueError('Relevance score must be between 0.0 and 1.0')
@@ -1021,17 +1028,14 @@ class WebSearchRequest(BaseModel):
 
 @app.post("/api/v1/web-search/search", tags=["Tools"])
 async def search_educational_content(
-    request: WebSearchRequest,
+    query: str = Query(..., min_length=1, max_length=500, description="Search query"),
     web_search: AsyncWebSearchService = Depends(get_web_search_service)
 ):
     """Search for educational content with enhanced validation"""
     try:
-        if request.context is None:
-            context = {}
-        else:
-            context = request.context
+        context = {}  # Default empty context
         
-        result = await web_search.search_educational_content(request.query, context)
+        result = await web_search.search_educational_content(query, context)
         return StandardResponse(
             status="success",
             message="Educational content search completed successfully",
@@ -1353,7 +1357,7 @@ async def validation_exception_handler(request, exc):
     """Validation error handler with enhanced error response"""
     logger.error(f"Validation error: {exc}")
     return JSONResponse(
-        status_code=400,
+        status_code=422,
         content={
             "status": "error",
             "message": "Validation error",
@@ -1371,6 +1375,7 @@ async def http_exception_handler(request, exc):
         content={
             "status": "error",
             "message": exc.detail,
+            "detail": exc.detail,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
     )
