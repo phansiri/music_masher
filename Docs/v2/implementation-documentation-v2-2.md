@@ -8,6 +8,8 @@ This implementation guide provides a conversational, MVP-first approach to build
 
 **Key Principle**: Build a conversational educational mashup generator with web search integration first, then add features through test-driven development with GitHub Actions CI/CD ensuring no regression.
 
+**Github URL**: https://github.com/phansiri/music_masher_ai
+
 ---
 
 ## Table of Contents

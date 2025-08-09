@@ -2,17 +2,20 @@ version: '3.8'
 
 services:
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
     ports:
       - "8000:8000"
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - DATABASE_PATH=/app/data/conversations.db
       - ENVIRONMENT=development
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=DEBUG
     volumes:
       - ./data:/app/data
       - ./.env:/app/.env:ro
+      - .:/app  # Mount source code for development
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

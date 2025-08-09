@@ -1,0 +1,105 @@
+name: Docker Security Scan
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - '.dockerignore'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - '.dockerignore'
+  schedule:
+    - cron: '0 2 * * 1'  # Run weekly on Mondays at 2 AM
+
+jobs:
+  docker-security:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner on Dockerfiles
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Hadolint for Dockerfile linting
+      uses: hadolint/hadolint-action@v3.1.0
+      with:
+        dockerfile: |
+          Dockerfile
+          Dockerfile.dev
+          Dockerfile.prod
+        format: sarif
+        output-file: hadolint-results.sarif
+
+    - name: Upload Hadolint results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'hadolint-results.sarif'
+
+  docker-compose-validation:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Validate Docker Compose files
+      run: |
+        docker-compose -f docker-compose.yml config
+        docker-compose -f docker-compose.dev.yml config
+        docker-compose -f docker-compose.prod.yml config
+        docker-compose -f docker-compose.dev-with-ollama.yml config
+        docker-compose -f docker-compose.prod-with-ollama.yml config
+        docker-compose -f docker-compose.with-ollama.yml config
+
+  dependency-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install UV
+      uses: astral-sh/setup-uv@v3
+
+    - name: Install dependencies
+      run: |
+        uv sync --frozen --no-cache
+
+    - name: Run safety check
+      run: |
+        uv run safety check --json --output safety-results.json || true
+
+    - name: Run pip-audit
+      run: |
+        uv run pip-audit --format json --output pip-audit-results.json || true
+
+    - name: Upload dependency scan results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: dependency-scan-results
+        path: |
+          safety-results.json
+          pip-audit-results.json
